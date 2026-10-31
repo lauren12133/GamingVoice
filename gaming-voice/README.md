@@ -157,18 +157,49 @@ GamingVoice 这边只做 8 声道增益（相当于它替掉了 Equalizer APO �
 
 ---
 
-## 五、换成真实 HRIR（可选）
+## 五、换成真实 HRIR（这一步决定"前后能不能分"）
 
-现在用的是 Woodworth 球头模型合成的 HRIR（`engine.rs` 的 `synth_hrir`）：
-双耳时差 + 头影低通 + 4 ms 早期反射，没有耳廓。它的价值是"能听出方向变了"，
-不是"和专业 HRTF 一样准"。
+没放 HRIR 时用的是 Woodworth 球头模型（`engine.rs` 的 `synth_hrir`）：双耳时差 + 头影低通
++ 4 ms 早期反射，**没有耳廓**。它的价值只有"能听出左右变了"——前后在数学上不可分，
+因为 `sin(±140°)` 与 `sin(±30°)` 只差 0.14，而真实 HRIR 靠 4–8 kHz 的耳廓陷波区分前后。
 
-要换真实数据：把一组 16 声道 HRIR WAV 按 `dsp/surround/hrir.rs` 约定的
-`(声道, 耳)` 排布喂进去（解析器在 `dsp/surround/wav.rs`，支持 PCM16/24/32、float32/64、
-EXTENSIBLE），然后把 `run_processor` 里的 `synth_hrir(...)` 换成 `Hrir::from_wav(...)`。
+### 放文件就行，不用改代码
 
-> HeSuVi 的 `hrir/*.wav` 具体声道排布没有书面规范，不同版本不一样。
-> 接之前先用单个冲激测一遍左右耳对应的通道，别直接套。
+把 `.wav` 丢进程序旁边的 `hrir/` 目录，点「启动」即生效：
+
+```
+GamingVoice.exe
+hrir/
+  ├─ sbx33.wav        ← HeSuVi 的档案，直接拷过来
+  └─ atmos-.wav
+```
+
+面板「方位数据 · HRIR」下拉会列出所有候选；生效后显示 **实测数据 · 前后可分**，
+一个都没有时显示红字 **内置合成模型 · 前后分不清** —— 不写这一条，装错了根本看不出来
+（声音仍然"像环绕"，只是前后糊在一起）。
+
+### 两种格式，按声道数自动识别
+
+| 声道数 | 排布 | 来源 |
+|---|---|---|
+| **14** | HeSuVi 原始排布 | `HeSuVi/hrir/*.wav` 直接拷，无需转换 |
+| **16** | in-major：`ch = 音箱序号 × 2 + 耳` | 自行测量 / SOFA 转换后的数据 |
+
+HeSuVi 的 14 轨顺序是 `FL-L, FL-R, SL-L, SL-R, BL-L, BL-R, FC-L, FR-R, FR-L, SR-R, SR-L,
+BR-R, BR-L, FC-R` —— 中置夹在中间、右侧三个声道的**右耳排在左耳前面**，这些都不是笔误。
+出处是 `jaakkopasanen/Impulcifer` 的 `constants.py`，HeSuVi 作者 Jaakko Pasanen 在
+SourceForge 帖里逐轨确认。LFE 没有独立轨（HeSuVi 把低频并进中置），所以 LFE 复用中置的双耳 IR。
+
+采样率必须是 48 kHz，否则直接报错：`wav.rs` 不做重采样，因为重采样会改 HRIR 的时频结构、
+方位会飘。导入时统一做峰值归一（等比缩放不改变 ILD/ITD，方向信息完全保留）。
+
+### 从 SOFA 转 16 轨
+
+SONICOM / CIPIC / HUTUBS 都是 SOFA（AES69）格式，用
+[ASH Toolset](https://github.com/ShanonPearce/ASH-Toolset/) 可直接导出 16 轨 WAV 或 HeSuVi 14 轨。
+
+> **许可**：Dolby / DTS 的 HRIR 属于录制数据，不能随 GPL 源码分发。程序只支持"用户自行导入"，
+> 仓库里不打包任何商业 HRIR；SONICOM 等开放数据集可以内置。
 
 ---
 
@@ -178,11 +209,11 @@ EXTENSIBLE），然后把 `run_processor` 里的 `synth_hrir(...)` 换成 `Hrir:
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/api/state` | 全量状态：端点列表、参数、电平、欠载 |
+| GET | `/api/state` | 全量状态：端点、参数、电平、欠载、`hrir{files,active,measured,dir}` |
 | POST | `/api/params` | 改 `gains_db` / `delays_ms` / `makeup_db` |
-| POST | `/api/start` | body `{"source":"<端点id>","sink":"<端点id>"}` |
+| POST | `/api/start` | body `{"source":"<id>","sink":"<id>","hrir":"sbx33.wav"}`；`hrir` 省略则自动取 `hrir/` 里第一个 |
 | POST | `/api/stop` | 停止 |
-| POST | `/api/refresh` | 重新枚举音频端点 |
+| POST | `/api/refresh` | 重新枚举音频端点，并重扫 `hrir/` |
 
 例：把后左后右抬 10 dB
 

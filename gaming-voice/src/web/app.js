@@ -197,6 +197,7 @@ function render() {
   fillSelect('selSource', s.endpoints, true);
   fillSelect('selSink', s.endpoints, false);
   updateMeta();
+  fillHrir();
 
   // 指标
   document.getElementById('kBlock').textContent = s.status.block_ms.toFixed(1) + ' ms';
@@ -462,6 +463,75 @@ if (blockEl) {
   });
 }
 
+// ---------------------------------------------------------------- HRIR 下拉
+
+let hrirPicked = null;
+
+function fillHrir() {
+  const h = (state && state.hrir) || {};
+  const files = h.files || [];
+  const sel = document.getElementById('selHrir');
+  const meta = document.getElementById('hrirMeta');
+  if (!sel || !meta) return;
+
+  const sig = files.join('|');
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    if (files.length === 0) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = '（空 · 用内置合成模型）';
+      sel.appendChild(o);
+    } else {
+      files.forEach((f) => {
+        const o = document.createElement('option');
+        o.value = f;
+        o.textContent = f;
+        sel.appendChild(o);
+      });
+    }
+    if (prev && files.includes(prev)) sel.value = prev;
+  }
+
+  // 生效中的那个（没在跑的时候 h.active 为空，保持用户的选择）
+  if (h.active && files.includes(h.active) && document.activeElement !== sel) {
+    sel.value = h.active;
+  }
+
+  if (h.measured) {
+    meta.textContent = state.running ? '实测数据 · 前后可分' : '已载入 · 点启动生效';
+    meta.classList.remove('bad');
+  } else if (files.length === 0) {
+    meta.textContent = '内置合成模型（Woodworth）· 只有左右，前后分不清';
+    meta.classList.add('bad');
+  } else {
+    meta.textContent = '已选但未生效 · 点启动后加载';
+    meta.classList.remove('bad');
+  }
+}
+
+async function restartWith(hrir) {
+  await fetch('/api/stop', { method: 'POST' }).catch(() => {});
+  await fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: document.getElementById('selSource').value || null,
+      sink: document.getElementById('selSink').value || null,
+      hrir,
+    }),
+  }).catch(() => {});
+}
+
+document.getElementById('selHrir').addEventListener('change', async () => {
+  const v = document.getElementById('selHrir').value;
+  if (!v) return;
+  hrirPicked = v;
+  if (state && state.running) await restartWith(v);
+});
+
 // ---------------------------------------------------------------- 启动 / 停止
 
 document.getElementById('btnRun').addEventListener('click', async () => {
@@ -480,14 +550,16 @@ document.getElementById('btnRun').addEventListener('click', async () => {
     body: JSON.stringify({
       source: document.getElementById('selSource').value || null,
       sink: document.getElementById('selSink').value || null,
+      hrir: hrirPicked || document.getElementById('selHrir').value || null,
     }),
   })
     .then((x) => x.json())
     .catch((e) => ({ ok: false, error: String(e) }));
   btn.disabled = false;
-  if (!r.ok) {
-    const warn = document.getElementById('warn');
-    warn.textContent = r.error || '启动失败';
+  const warn = document.getElementById('warn');
+  const msg = r.error || r.warning;
+  if (msg) {
+    warn.textContent = msg;
     warn.classList.remove('hidden');
   }
 });

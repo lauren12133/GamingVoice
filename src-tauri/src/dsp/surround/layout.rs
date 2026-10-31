@@ -60,8 +60,8 @@ impl Speaker {
     Speaker::Sr,
   ];
 
-  /// 通道下标（0..8）。
-  pub fn index(self) -> usize {
+  /// 通道下标（0..8）。`const fn` 是为了让 `hrir::HESUVI_TRACKS` 能在编译期写好映射表。
+  pub const fn index(self) -> usize {
     match self {
       Speaker::Fl => 0,
       Speaker::Fr => 1,

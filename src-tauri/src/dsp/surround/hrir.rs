@@ -16,9 +16,9 @@
 //! **这是整套虚拟环绕的"方位"来源**：哪条 FIR 对应"左后方 30°"这个方向，
 //! 全部由数据本身决定，代码不做任何方位假设（方位只用于界面上画雷达）。
 //!
-//! ## 文件格式（本项目的规范，唯一一种）
+//! ## 文件格式：接受两种排布，按声道数自动识别
 //!
-//! `WAV`，48 kHz，**16 声道**（= 8 输入 × 2 耳），**in-major** 排列：
+//! **A. 16 声道 · in-major**（本项目原生格式，推荐）：
 //!
 //! ```text
 //! ch0 = FL→左耳   ch1 = FL→右耳
@@ -30,9 +30,14 @@
 //! 即 `channel = in_index * 2 + ear`（ear: 0 = 左，1 = 右）。所有声道等长，
 //! 长度即 FIR 抽头数（典型 256–2048）。
 //!
-//! 为什么不直接吃 HeSuVi 的 `hrir/*.wav`：HeSuVi 文件里每声道的确切语义没有书面规范，
-//! 且各家 HRIR 包版本间不一致；本项目只认上面这一种**可验证**的排布，
-//! HeSuVi 目录由 `compat::hesuvi` 显式转换（转换顺序在那里集中定义，便于按实测修正）。
+//! **B. 14 轨 · HeSuVi 原始排布**（`hrir/*.wav`，可直接丢进来，无需外部转换）：
+//!
+//! 顺序不是 in-major —— 中置夹在中间、右声道左右耳还倒了一次，出处是
+//! `jaakkopasanen/Impulcifer` 的 `constants.py`，由 HeSuVi 作者 Jaakko Pasanen 本人确认。
+//! 见 [`HESUVI_TRACKS`]。LFE 在 HeSuVi 里没有独立轨（低频并进中置），
+//! 所以第 3 号音箱复用中置的双耳 IR。
+//!
+//! 两种都由 [`Hrir::from_wav`] 自动判别；采样率必须是 48 kHz（引擎内部率）。
 //!
 //! 许可提醒：HRIR 是录音/测量数据，商业算法的 HRIR（Dolby/DTS 等）**不可随 GPL 源码分发**，
 //! 只能由用户自行导入（`LICENSE-THIRD-PARTY.txt` 记一条）。
@@ -46,6 +51,30 @@ pub const EARS: usize = 2;
 /// 一个完整矩阵的 FIR 条数：8 音箱 × 2 耳。
 pub const FIRS: usize = CHANNELS * EARS;
 
+/// HeSuVi 的 14 轨排布 → `(音箱下标, 耳)`；耳 0 = 左，1 = 右。
+///
+/// 顺序出处：`jaakkopasanen/Impulcifer` 的 `constants.py`，HeSuVi 作者
+/// Jaakko Pasanen 在 SourceForge 论坛帖中逐轨确认。**三处反直觉的地方都是真的**：
+/// 中置在第 7 和第 14 轨（不是连续的最后一对）、FR/SR/BR 的右耳排在左耳之前。
+///
+/// LFE 不在表里 —— HeSuVi 把低频并进中置，没有第 15 轨。
+pub const HESUVI_TRACKS: [(usize, usize); 14] = [
+  (Speaker::Fl.index(), 0), // 0  FL-left
+  (Speaker::Fl.index(), 1), // 1  FL-right
+  (Speaker::Sl.index(), 0), // 2  SL-left
+  (Speaker::Sl.index(), 1), // 3  SL-right
+  (Speaker::Bl.index(), 0), // 4  BL-left
+  (Speaker::Bl.index(), 1), // 5  BL-right
+  (Speaker::Fc.index(), 0), // 6  FC-left
+  (Speaker::Fr.index(), 1), // 7  FR-right
+  (Speaker::Fr.index(), 0), // 8  FR-left
+  (Speaker::Sr.index(), 1), // 9  SR-right
+  (Speaker::Sr.index(), 0), // 10 SR-left
+  (Speaker::Br.index(), 1), // 11 BR-right
+  (Speaker::Br.index(), 0), // 12 BR-left
+  (Speaker::Fc.index(), 1), // 13 FC-right
+];
+
 /// 一组 HRIR：`ir[(in_ch * 2 + ear) * taps + t]`。
 #[derive(Clone, Debug)]
 pub struct Hrir {
@@ -58,14 +87,10 @@ pub struct Hrir {
 }
 
 impl Hrir {
-  /// 从 16 声道 WAV 解析。`name` 只用于界面显示。
+  /// 从 WAV 解析，**按声道数自动识别排布**：16 声道走 in-major，14 声道走 HeSuVi。
+  /// `name` 只用于界面显示。
   pub fn from_wav(w: &Wav, name: impl Into<String>) -> Result<Hrir, String> {
-    if w.channels as usize != FIRS {
-      return Err(format!(
-        "HRIR 需要 {FIRS} 声道（8 音箱 × 2 耳），这个文件是 {} 声道",
-        w.channels
-      ));
-    }
+    let name = name.into();
     if w.sample_rate != SAMPLE_RATE {
       return Err(format!(
         "HRIR 采样率必须是 {SAMPLE_RATE} Hz（引擎内部采样率），这个文件是 {} Hz",
@@ -75,7 +100,25 @@ impl Hrir {
     if w.frames == 0 {
       return Err("HRIR 没有任何样本".to_string());
     }
-    // 交错 → 按 (in, ear) 拍平
+    let ch = w.channels as usize;
+    let h = if ch == FIRS {
+      Hrir::from_in_major(w, name)?
+    } else if ch == HESUVI_TRACKS.len() {
+      Hrir::from_hesuvi(w, name)?
+    } else {
+      return Err(format!(
+        "HRIR 需要 16 声道（8 音箱 × 2 耳，in-major）或 14 轨（HeSuVi 原始格式，\
+         直接从 HeSuVi 的 hrir 目录拷过来即可），这个文件是 {ch} 声道"
+      ));
+    };
+    if h.peak() <= f32::EPSILON {
+      return Err("HRIR 全是静音（峰值 0）".to_string());
+    }
+    Ok(h)
+  }
+
+  /// 16 声道 in-major：`channel = in_index * 2 + ear`，原样拍平。
+  fn from_in_major(w: &Wav, name: String) -> Result<Hrir, String> {
     let taps = w.frames;
     let mut ir = vec![0.0f32; FIRS * taps];
     for c in 0..FIRS {
@@ -84,16 +127,38 @@ impl Hrir {
         ir[base + t] = sample(w, t, c);
       }
     }
-    let h = Hrir {
+    Ok(Hrir {
       sample_rate: w.sample_rate,
       taps,
       ir,
-      name: name.into(),
-    };
-    if h.peak() <= f32::EPSILON {
-      return Err("HRIR 全是静音（峰值 0）".to_string());
+      name,
+    })
+  }
+
+  /// 14 轨 HeSuVi：按 [`HESUVI_TRACKS`] 重排成 in-major。
+  ///
+  /// LFE 没有独立轨（HeSuVi 把低频并进中置），这里直接复用中置的双耳 IR ——
+  /// 与 HeSuVi 的实际行为一致，而不是留空（留空会让低频整段消失）。
+  fn from_hesuvi(w: &Wav, name: String) -> Result<Hrir, String> {
+    let taps = w.frames;
+    let mut ir = vec![0.0f32; FIRS * taps];
+    for (track, &(in_ch, ear)) in HESUVI_TRACKS.iter().enumerate() {
+      let base = (in_ch * EARS + ear) * taps;
+      for t in 0..taps {
+        ir[base + t] = sample(w, t, track);
+      }
     }
-    Ok(h)
+    for ear in 0..EARS {
+      let from = (Speaker::Fc.index() * EARS + ear) * taps;
+      let to = (Speaker::Lfe.index() * EARS + ear) * taps;
+      ir.copy_within(from..from + taps, to);
+    }
+    Ok(Hrir {
+      sample_rate: w.sample_rate,
+      taps,
+      ir,
+      name,
+    })
   }
 
   /// 一条 FIR 的切片：第 `in_ch` 个音箱 → 第 `ear` 只耳。
@@ -197,6 +262,54 @@ mod tests {
           assert!((v - want).abs() < 1e-7, "in={in_ch} ear={ear} t={t}");
         }
       }
+    }
+  }
+
+  /// 造一个 14 轨 HeSuVi 文件：第 n 轨的全部样本 = (n+1)/16，
+  /// 这样每条 FIR 的值就能反查出它来自第几轨。
+  fn hesuvi_14(taps: usize) -> Vec<u8> {
+    const TRACKS: usize = 14;
+    let mut data = vec![0.0f32; taps * TRACKS];
+    for track in 0..TRACKS {
+      let v = (track + 1) as f32 / 16.0;
+      for t in 0..taps {
+        data[t * TRACKS + track] = v;
+      }
+    }
+    encode_f32(SAMPLE_RATE, TRACKS as u16, 0, &data)
+  }
+
+  #[test]
+  fn maps_hesuvi_14_track_layout() {
+    let taps = 16;
+    let w = crate::dsp::surround::wav::parse(&hesuvi_14(taps)).unwrap();
+    let h = Hrir::from_wav(&w, "hesuvi").unwrap();
+    assert_eq!(h.taps, taps);
+
+    // 写死最容易搞反的三条，避免"用表验证表"的自证：
+    // FR 在 HeSuVi 里右耳排在左耳前面（第 8 轨=右耳，第 9 轨=左耳）。
+    assert!((h.fir(Speaker::Fr.index(), 0)[0] - 9.0 / 16.0).abs() < 1e-7);
+    assert!((h.fir(Speaker::Fr.index(), 1)[0] - 8.0 / 16.0).abs() < 1e-7);
+    // 中置被劈到文件头尾两轨（第 7 轨=左耳，第 14 轨=右耳），不是连续一对。
+    assert!((h.fir(Speaker::Fc.index(), 0)[0] - 7.0 / 16.0).abs() < 1e-7);
+    assert!((h.fir(Speaker::Fc.index(), 1)[0] - 14.0 / 16.0).abs() < 1e-7);
+
+    // 整表都对上
+    for (track, &(in_ch, ear)) in HESUVI_TRACKS.iter().enumerate() {
+      let want = (track + 1) as f32 / 16.0;
+      for (t, v) in h.fir(in_ch, ear).iter().enumerate() {
+        assert!(
+          (v - want).abs() < 1e-7,
+          "轨 {track} → in={in_ch} ear={ear} t={t}"
+        );
+      }
+    }
+    // LFE 复用中置（HeSuVi 没有第 15 轨）
+    for ear in 0..EARS {
+      assert_eq!(
+        h.fir(Speaker::Lfe.index(), ear),
+        h.fir(Speaker::Fc.index(), ear)
+      );
     }
   }
 

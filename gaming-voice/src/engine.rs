@@ -3,6 +3,7 @@
 //! 与平台无关：这里只认「交错排列的 f32 环」，采集/渲染各自在 `audio_windows.rs` 里。
 //! 这样 Linux 上也能跑测试（`cargo test` 用假环喂数据），不必等 Windows。
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -81,6 +82,10 @@ pub struct Status {
   pub sink_channels: u16,
   pub sink_rate: u32,
   pub error: Option<String>,
+  /// 当前生效的 HRIR 名字（文件名 / `woodworth-175mm`）
+  pub hrir_name: String,
+  /// 这个 HRIR 是实测数据（true）还是数学合成（false）——**决定前后能不能分**
+  pub hrir_measured: bool,
 }
 
 /// 线程间共享状态。
@@ -168,17 +173,117 @@ pub fn synth_hrir(taps: usize, head_mm: f32) -> Hrir {
   }
 }
 
+/// 放 HRIR 文件的目录名。打包后在 exe 同级，开发时在项目根。
+pub const HRIR_DIR: &str = "hrir";
+
+/// 依次尝试的 HRIR 目录：exe 所在目录 → 当前工作目录。
+///
+/// 两个都试，是因为运行时 exe 可能被装在任意位置，而开发时又不想把 wav 拷进 target。
+pub fn hrir_dirs() -> Vec<PathBuf> {
+  let mut dirs = Vec::new();
+  if let Some(d) = std::env::current_exe()
+    .ok()
+    .and_then(|p| p.parent().map(|d| d.join(HRIR_DIR)))
+  {
+    dirs.push(d);
+  }
+  if let Some(d) = std::env::current_dir().ok().map(|d| d.join(HRIR_DIR)) {
+    dirs.push(d);
+  }
+  dirs.dedup();
+  dirs
+}
+
+/// 列出所有可用的 HRIR 文件（`.wav`，跨目录按文件名去重，最后按路径排序）。
+pub fn list_hrir_files() -> Vec<PathBuf> {
+  let mut out: Vec<PathBuf> = Vec::new();
+  for dir in hrir_dirs() {
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+      continue;
+    };
+    let mut here: Vec<PathBuf> = rd
+      .flatten()
+      .map(|e| e.path())
+      .filter(|p| {
+        p.extension()
+          .and_then(|e| e.to_str())
+          .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+      })
+      .collect();
+    here.sort();
+    for p in here {
+      let fname = p.file_name().map(|s| s.to_os_string());
+      if !out
+        .iter()
+        .any(|q| q.file_name().map(|s| s.to_os_string()) == fname)
+      {
+        out.push(p);
+      }
+    }
+  }
+  out.sort();
+  out
+}
+
+/// 自动挑一套：`hrir/` 里排序第一个；一个都没有则 `None`（走合成兜底）。
+pub fn auto_hrir() -> Option<PathBuf> {
+  list_hrir_files().into_iter().next()
+}
+
+/// 按文件名找 HRIR（也接受绝对路径）。找不到返回 `None`。
+pub fn find_hrir(name: &str) -> Option<PathBuf> {
+  let want = name.trim();
+  if want.is_empty() {
+    return None;
+  }
+  let direct = Path::new(want);
+  if direct.is_absolute() && direct.is_file() {
+    return Some(direct.to_path_buf());
+  }
+  list_hrir_files()
+    .into_iter()
+    .find(|p| p.file_name().and_then(|s| s.to_str()) == Some(want))
+}
+
+/// 读一个 HRIR 文件并归一化峰值。`Err` 是人话，直接上屏。
+pub fn load_hrir(path: &Path) -> Result<Hrir, String> {
+  let bytes = std::fs::read(path).map_err(|e| format!("读不了 {}：{e}", path.display()))?;
+  let w = crate::dsp::surround::wav::parse(&bytes)?;
+  let name = path
+    .file_name()
+    .map(|s| s.to_string_lossy().into_owned())
+    .unwrap_or_else(|| "hrir.wav".to_string());
+  let mut h = Hrir::from_wav(&w, name)?;
+  // 不同来源的 HRIR 电平能差好几倍，不归一就是"换档案 = 一次音量跳变"。
+  // 全局等比缩放不改 ILD/ITD，方向信息完全保留。
+  h.normalize_peak(1.0);
+  Ok(h)
+}
+
 /// 处理线程主体：从 `src`（交错 8ch）读、往 `dst`（交错 2ch）写。
 ///
 /// 环里没有数据就补静音（不阻塞）—— 采集断流时宁可静音，也不要卡住渲染线程。
+///
+/// `hrir` 传 `None` 才退回 [`synth_hrir`]：那是**兜底**，不是默认值。合成模型只有
+/// ITD 与头影一阶低通，没有耳廓谱线索，**前后在数学上不可区分**；有实测 IR 就必须用实测。
 pub fn run_processor(
   shared: Arc<Shared>,
   mut src: rtrb::Consumer<f32>,
   mut dst: rtrb::Producer<f32>,
   stop: Arc<AtomicBool>,
+  hrir: Option<Hrir>,
 ) {
   let mut params = shared.params.lock().map(|p| p.clone()).unwrap_or_default();
-  let mut sp = Spatial::with_block(synth_hrir(512, 175.0), params.to_spatial(), BLOCK);
+
+  let measured = hrir.is_some();
+  let hrir = hrir.unwrap_or_else(|| synth_hrir(512, 175.0));
+  // 「现在用的是哪套 HRIR」必须上屏 —— 装错了的声音听起来仍然"像环绕"，
+  // 只是前后分不清，界面上看不出任何异常，这是最难自查的故障。
+  if let Ok(mut st) = shared.status.lock() {
+    st.hrir_name = hrir.name.clone();
+    st.hrir_measured = measured;
+  }
+  let mut sp = Spatial::with_block(hrir, params.to_spatial(), BLOCK);
 
   // 取数块与处理块必须是同一个值（[`BLOCK`]）。旧实现里一个用 HOP、一个用可调 block，
   // 结果每次只消费 480 中的 128 帧，剩下的被丢掉 → 周期性断续，听感就是"电流声"。
@@ -277,6 +382,37 @@ mod tests {
         assert!(e_sum > 1e-4, "声道 {c} 耳 {e} 的 FIR 没有能量");
       }
     }
+  }
+
+  #[test]
+  fn loads_hesuvi_14ch_from_disk() {
+    // 端到端：磁盘上的 14 轨 wav → 引擎能直接用的 Hrir（这就是之前缺的那一环）。
+    const TRACKS: usize = 14;
+    let taps = 8usize;
+    let dir = std::env::temp_dir().join(format!("gv-hrir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("atmos-14ch.wav");
+
+    let mut data = vec![0.0f32; taps * TRACKS];
+    for track in 0..TRACKS {
+      for t in 0..taps {
+        data[t * TRACKS + track] = (track + 1) as f32 / 16.0;
+      }
+    }
+    let bytes = crate::dsp::surround::wav::encode_f32(48_000, TRACKS as u16, 0, &data);
+    std::fs::write(&path, bytes).unwrap();
+
+    let h = load_hrir(&path).unwrap();
+    assert_eq!(h.taps, taps);
+    assert_eq!(h.name, "atmos-14ch.wav");
+    // 峰值归一：最大 FIR（第 14 轨 = 中置右耳 = 14/16）被拉到 1.0
+    assert!((h.peak() - 1.0).abs() < 1e-6);
+    // 归一化系数 k = 1 / (14/16)；FL 左耳来自第 1 轨、右耳来自第 2 轨
+    let k = 16.0 / 14.0;
+    assert!((h.fir(Speaker::Fl.index(), 0)[0] - 1.0 / 16.0 * k).abs() < 1e-6);
+    assert!((h.fir(Speaker::Fl.index(), 1)[0] - 2.0 / 16.0 * k).abs() < 1e-6);
+
+    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]
