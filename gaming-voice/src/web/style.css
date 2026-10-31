@@ -137,6 +137,10 @@ button.chip.sq{padding:7px 10px;font-size:12.5px;font-family:var(--mono)}
 .field>span{font-size:12.5px;color:var(--dim2);letter-spacing:.2px}
 .field .meta{font-size:12px;color:var(--dim2);font-style:normal;
             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 合成模型 = 前后分不清，属于"看起来正常其实错了"的状态，必须显眼 */
+.field .meta.bad{color:var(--warn,#e0a33e)}
+/* HRIR 那行横跨整宽：它是"前后能不能分"的总开关，不该跟设备下拉挤成半行 */
+.field.wide{grid-column:1/-1}
 
 select{
   font:inherit;font-size:13.5px;color:var(--txt);background:var(--card2);

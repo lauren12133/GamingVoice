@@ -92,6 +92,27 @@ pub fn endpoints_cached() -> Vec<audio_platform::Endpoint> {
 fn main() {
   let shared = Shared::new();
 
+  // HRIR 目录：不存在就建一个空目录，用户才知道 wav 该往哪放
+  // （「看不见的状态等于不存在」——目录都没有，就别指望用户猜到路径）。
+  for dir in engine::hrir_dirs() {
+    if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
+      println!("已创建 HRIR 目录：{}", dir.display());
+    }
+  }
+  let found = refresh_hrirs();
+  if found.is_empty() {
+    println!(
+      "[提示] HRIR 目录里没有 .wav —— 将使用合成模型（只有方位感，前后分不清）。\n\
+       把 HeSuVi 的 hrir/*.wav 直接拷进 -> {}",
+      engine::hrir_dirs()
+        .first()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "hrir/".into())
+    );
+  } else {
+    println!("发现 {} 个 HRIR：{}", found.len(), found.join(", "));
+  }
+
   // 先枚举一次端点，让界面一打开就有内容
   let endpoints = endpoints_cached();
   if endpoints.is_empty() {
@@ -219,6 +240,39 @@ fn handle(mut s: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
   s.flush()
 }
 
+/// 可用 HRIR 文件名缓存。
+///
+/// 目录扫描不该出现在每帧的 `state` 里（面板轮询 10–20 Hz），所以只在
+/// 启动和「刷新」时重扫。
+static HRIRS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// 当前 HRIR 实际来自哪个目录（可能不是首选目录，所以单独缓存）。
+static HRIR_DIR_ACTIVE: Mutex<String> = Mutex::new(String::new());
+
+/// 重扫 `hrir/` 目录，返回文件名列表（启动流程与「刷新」都会调）。
+pub fn refresh_hrirs() -> Vec<String> {
+  let paths = engine::list_hrir_files();
+  let names: Vec<String> = paths
+    .iter()
+    .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+    .collect();
+  if let Ok(mut g) = HRIRS.lock() {
+    *g = names.clone();
+  }
+  if let Ok(mut g) = HRIR_DIR_ACTIVE.lock() {
+    *g = paths
+      .first()
+      .and_then(|p| p.parent().map(|d| d.display().to_string()))
+      .or_else(|| engine::hrir_dirs().first().map(|p| p.display().to_string()))
+      .unwrap_or_default();
+  }
+  names
+}
+
+fn hrir_names() -> Vec<String> {
+  HRIRS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 pub fn state_json(shared: &Arc<Shared>) -> Value {
   let p = shared.params.lock().map(|p| p.clone()).unwrap_or_default();
   let lv = shared.levels.lock().map(|l| *l).unwrap_or_default();
@@ -258,6 +312,12 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "delays_ms": p.delays_ms,
       "makeup_db": p.makeup_db,
       "block": engine::BLOCK,
+    },
+    "hrir": {
+      "files": hrir_names(),
+      "active": st.hrir_name,
+      "measured": st.hrir_measured,
+      "dir": HRIR_DIR_ACTIVE.lock().map(|d| d.clone()).unwrap_or_default(),
     },
     "levels": {
       "in_peak": lv.in_peak,
@@ -329,6 +389,48 @@ pub fn start(shared: &Arc<Shared>, body: &[u8]) -> String {
     .get("sink")
     .and_then(|x| x.as_str())
     .map(|s| s.to_string());
+  // 显式指定 HRIR（文件名或绝对路径）；不指定则自动挑 hrir/ 里第一个。
+  let hrir_want = v
+    .get("hrir")
+    .and_then(|x| x.as_str())
+    .map(|s| s.to_string());
+
+  // ── 先把 HRIR 解决掉：纯文件 IO，和设备能不能打开无关，所以放最前面 ─────────
+  // 口径：**加载失败不阻断启动**（音频照样能跑），但必须把原因带上屏 —— 否则
+  // 用户听到的是一套"有环绕感、但前后分不清"的合成模型，还以为装成功了。
+  let mut hrir_warn: Option<String> = None;
+  let picked = match hrir_want.as_deref() {
+    Some(n) => engine::find_hrir(n).ok_or_else(|| format!("找不到 HRIR「{n}」")),
+    None => engine::auto_hrir().ok_or_else(|| {
+      format!(
+        "{} 里没有 .wav 文件（HeSuVi 的 hrir/*.wav 直接拷进去即可）",
+        engine::hrir_dirs()
+          .first()
+          .map(|p| p.display().to_string())
+          .unwrap_or_else(|| "hrir/".into())
+      )
+    }),
+  };
+  let hrir = match picked {
+    Ok(p) => match engine::load_hrir(&p) {
+      Ok(h) => Some(h),
+      Err(e) => {
+        hrir_warn = Some(format!("{} 解析失败，已退回合成模型：{e}", p.display()));
+        None
+      }
+    },
+    Err(e) => {
+      hrir_warn = Some(format!("{e}，已退回合成模型（只有方位感，前后分不清）"));
+      None
+    }
+  };
+  let hrir_label = hrir.as_ref().map(|h| h.name.clone());
+  let hrir_measured = hrir.is_some();
+  // 立刻上屏：处理线程要等设备打开才跑得起来，但「用的是哪套 HRIR」现在就该知道。
+  if let Ok(mut st) = shared.status.lock() {
+    st.hrir_name = hrir_label.clone().unwrap_or_default();
+    st.hrir_measured = hrir_measured;
+  }
 
   let stop_flag = Arc::new(AtomicBool::new(false));
   // 输入环 2 s（8 声道交错），输出环 0.5 s（2 声道交错）
@@ -388,7 +490,7 @@ pub fn start(shared: &Arc<Shared>, body: &[u8]) -> String {
   let st2 = stop_flag.clone();
   let proc = std::thread::Builder::new()
     .name("pv-proc".into())
-    .spawn(move || engine::run_processor(sh2, in_cons, out_prod, st2))
+    .spawn(move || engine::run_processor(sh2, in_cons, out_prod, st2, hrir))
     .expect("spawn processor");
 
   let src_label = source.clone().unwrap_or_else(|| "系统默认输出".into());
@@ -401,7 +503,13 @@ pub fn start(shared: &Arc<Shared>, body: &[u8]) -> String {
       sink_label: snk_label,
     });
   }
-  json!({"ok": true}).to_string()
+  json!({
+    "ok": true,
+    "hrir": hrir_label,
+    "hrir_measured": hrir_measured,
+    "warning": hrir_warn,
+  })
+  .to_string()
 }
 
 pub fn refresh() -> String {
@@ -409,7 +517,8 @@ pub fn refresh() -> String {
     g.clear();
   }
   let n = endpoints_cached().len();
-  json!({"ok": true, "count": n}).to_string()
+  let h = refresh_hrirs().len();
+  json!({"ok": true, "count": n, "hrir_count": h}).to_string()
 }
 
 /// GUI 用：现在是否在跑。
