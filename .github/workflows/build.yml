@@ -1,0 +1,45 @@
+name: Build GamingVoice (Windows)
+
+on:
+  workflow_dispatch:        # 手动触发
+  push:
+    tags: ['v*']            # 打 tag 时自动出包
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: gaming-voice
+
+      - name: Check formatting
+        working-directory: gaming-voice
+        run: cargo fmt -- --check
+
+      - name: Clippy (deny warnings)
+        working-directory: gaming-voice
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        working-directory: gaming-voice
+        run: cargo test
+
+      - name: Build release
+        working-directory: gaming-voice
+        run: cargo build --release
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GamingVoice-windows-x64
+          path: gaming-voice/target/release/GamingVoice.exe
+          if-no-files-found: error
