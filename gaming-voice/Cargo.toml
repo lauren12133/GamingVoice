@@ -1,0 +1,42 @@
+[package]
+name = "gaming-voice"
+version = "0.2.0"
+edition = "2021"
+description = "GamingVoice —— 8 声道虚拟 7.1 调音台：WASAPI loopback → 每方向增益 → HRIR → 双耳耳机"
+
+[[bin]]
+name = "GamingVoice"
+path = "src/main.rs"
+
+[dependencies]
+rustfft = "6"
+rtrb = "0.3"
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Media_Audio_Endpoints",
+    # 设备友好名：IPropertyStore + PKEY_Device_FriendlyName（PROPVARIANT）
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_Shell_PropertiesSystem",
+    # 原生窗口 + 托盘 + 菜单
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+] }
+
+# 发布构建：单文件、无运行时依赖（MSVC 运行时静态链）
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
