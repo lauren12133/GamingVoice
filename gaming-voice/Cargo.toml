@@ -31,6 +31,8 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    # 开机启动：HKCU 的 Run 键
+    "Win32_System_Registry",
 ] }
 
 # 发布构建：单文件、无运行时依赖（MSVC 运行时静态链）

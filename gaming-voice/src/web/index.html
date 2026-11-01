@@ -28,7 +28,25 @@
     </div>
   </header>
 
-  <div id="warn" class="warn hidden"></div>
+  <div id="warn" class="warn hidden">
+    <span id="warnText"></span>
+    <button id="btnGuide" class="warnBtn" title="打开 Windows 声音设置">设置引导</button>
+  </div>
+
+  <div id="vbCard" class="vbCard hidden">
+    <div class="vbBody">
+      <b>还差一步：VB-CABLE 虚拟声卡</b>
+      <p>
+        「单独调每个方向」的前提是游戏输出 <b>8 条独立声道</b>。没有虚拟 7.1 端点时，
+        系统只会给一条已经混好的立体声，8 个推子就会退化成 1 个总音量。
+        装完还要在「声音设置 → 该设备 → 配置扬声器」里选 <b>7.1 环绕</b> —— 默认是立体声。
+      </p>
+    </div>
+    <div class="vbActions">
+      <button id="btnVbInstall" class="primary">一键安装 VB-CABLE</button>
+      <button id="btnVbGuide" class="ghost">手动配置 7.1</button>
+    </div>
+  </div>
 
   <section class="panel devices">
     <label class="field">
@@ -62,11 +80,11 @@
       <div class="panelHead">
         <h2>方向增益</h2>
         <div class="presets">
-          <button data-preset="flat">平直</button>
-          <button data-preset="tac">战术·脚步</button>
-          <button data-preset="cinema">影院</button>
-          <button data-preset="front">只听前方</button>
-          <button data-preset="muteBack">后方静音</button>
+          <select id="selPreset" title="选择方向预设"></select>
+          <button id="btnPresetSave" title="把当前 8 个方向的增益存成一个新预设">存为…</button>
+          <button id="btnPresetDel" class="ghost" title="删除当前自定义预设">删除</button>
+          <input id="presetName" placeholder="预设名（≤16 字）" maxlength="16" hidden>
+          <button id="btnPresetOk" class="primary" hidden>确定</button>
         </div>
       </div>
       <div id="chList"></div>
@@ -109,9 +127,20 @@
     </aside>
   </main>
 
-  <footer>
-    <span>GamingVoice · 独立音频通路，不经过 PureVox 的单声道引擎。</span>
-  </footer>
+  <section class="panel eqPanel">
+    <div class="panelHead">
+      <h2>耳机 EQ <em>10 段 · 作用在双耳输出</em></h2>
+      <div class="eqTools">
+        <label class="chk"><input type="checkbox" id="eqOn" checked><span>启用</span></label>
+        <button id="btnEqFlat" class="ghost">全部归零</button>
+      </div>
+    </div>
+    <div id="eqBands"></div>
+    <p class="note">
+      EQ 在 HRIR 之后 —— 它补偿的是<b>耳机本身</b>的频响。抬得越狠，卷积塑造的方位线索被冲淡得越多，
+      所以范围限在 ±12 dB，全 0 时是真正的直通。
+    </p>
+  </section>
 </div>
 <script src="/app.js"></script>
 </body>

@@ -120,8 +120,28 @@ button.chip.sq{padding:7px 10px;font-size:12.5px;font-family:var(--mono)}
   background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn);
   border-radius:11px;padding:12px 15px;font-size:13.5px;line-height:1.7;
   margin-bottom:16px;white-space:pre-wrap;
+  display:flex;align-items:flex-start;gap:12px;
 }
 .warn b{font-weight:700}
+/* 「设置引导」钉在横幅最右侧：报错时最需要的是下一步做什么，不是再读一遍错误 */
+.warn #warnText{flex:1;min-width:0}
+.warnBtn{
+  flex:0 0 auto;align-self:flex-start;
+  background:transparent;border:1px solid currentColor;color:inherit;
+  border-radius:8px;padding:5px 11px;font-size:12.5px;white-space:nowrap;opacity:.85;
+}
+.warnBtn:hover{opacity:1}
+
+/* ---------------- VB-CABLE 安装卡 ---------------- */
+.vbCard{
+  display:flex;gap:16px;align-items:center;flex-wrap:wrap;
+  background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow);
+}
+.vbBody{flex:1;min-width:280px}
+.vbBody>b{display:block;font-size:14px;margin-bottom:6px;color:var(--txt)}
+.vbBody p{margin:0;font-size:12.5px;line-height:1.75;color:var(--dim)}
+.vbActions{display:flex;gap:8px;flex-wrap:wrap}
 .hidden{display:none}
 
 /* ---------------- 设备区 ---------------- */
@@ -172,9 +192,54 @@ main{display:grid;grid-template-columns:1fr 352px;gap:16px;align-items:start}
   padding:14px 18px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap;
 }
 .panelHead h2{margin:0;font-size:14px;font-weight:650;color:var(--txt);letter-spacing:.3px}
-.presets{display:flex;gap:7px;flex-wrap:wrap}
+.presets{display:flex;gap:7px;flex-wrap:nowrap;align-items:center;flex:0 0 auto}
+.panelHead{align-items:center;gap:12px}
+.panelHead h2{white-space:nowrap}
 .presets button{padding:6px 11px;font-size:12.5px;border-radius:8px;color:var(--dim)}
 .presets button:hover{color:var(--txt)}
+.presets select{padding:6px 30px 6px 10px;font-size:12.5px;border-radius:8px;min-width:126px}
+.presets input{
+  padding:6px 10px;font-size:12.5px;border-radius:8px;width:132px;
+  background:var(--card2);border:1px solid var(--line);color:var(--txt);font-family:inherit;
+}
+
+/* ---------------- 耳机 EQ ---------------- */
+.eqPanel{padding:16px 18px;margin-top:16px}
+.panelHead h2 em{font-style:normal;font-size:11.5px;color:var(--dim2);margin-left:8px;font-weight:400}
+.eqTools{display:flex;gap:10px;align-items:center}
+.chk{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim);cursor:pointer}
+.chk input{accent-color:var(--acc);cursor:pointer}
+#eqBands{
+  display:grid;grid-template-columns:repeat(10,1fr);gap:6px;
+  margin:18px 0 8px;align-items:end;justify-items:center;
+}
+.eqBand{display:flex;flex-direction:column;align-items:center;gap:6px}
+.eqBand .db{font-family:var(--mono);font-size:11px;color:var(--acc2);min-height:14px}
+/* 竖推子：Chrome 用 writing-mode，Firefox 走 orient 回退 */
+.eqBand input[type=range]{
+  -webkit-appearance:none;appearance:none;
+  writing-mode:vertical-lr;direction:rtl;
+  flex:0 0 auto;width:24px;height:150px;
+  cursor:ns-resize;background:transparent;
+}
+/* 竖直推子的轨道要用固定长度，百分比在竖直模式下语义不可靠 */
+.eqBand input[type=range]::-webkit-slider-runnable-track{
+  width:6px;height:150px;border-radius:3px;background:var(--track);
+  border:1px solid var(--line);
+}
+.eqBand input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:15px;height:15px;border-radius:50%;
+  background:var(--acc);border:2px solid var(--card);
+  box-shadow:0 0 0 1px var(--acc);
+}
+.eqBand input[type=range]::-moz-range-track{
+  width:6px;border-radius:3px;background:var(--track);
+}
+.eqBand input[type=range]::-moz-range-thumb{
+  width:13px;height:13px;border:2px solid var(--card);border-radius:50%;background:var(--acc);
+}
+.eqBand .hz{font-family:var(--mono);font-size:10.5px;color:var(--dim2);letter-spacing:-.2px}
 
 .tag{
   font-size:11.5px;padding:3px 9px;border-radius:999px;

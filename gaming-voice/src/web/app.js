@@ -164,6 +164,20 @@ async function poll() {
   setTimeout(poll, 120);
 }
 
+/**
+ * 主动弹一条提示。
+ *
+ * 带"粘性"：面板每 120 ms 会用 state 重刷警告条，如果不设保护，
+ * 用户刚看到的安装指引会被下一帧的状态覆盖掉（看起来像没点成功）。
+ */
+let warnSticky = 0;
+function showWarn(text, ms = 9000) {
+  warnSticky = Date.now() + ms;
+  const w = document.getElementById('warn');
+  document.getElementById('warnText').textContent = text;
+  w.classList.remove('hidden');
+}
+
 function render() {
   const s = state;
 
@@ -175,22 +189,25 @@ function render() {
   btn.textContent = s.running ? '停止' : '启动';
   btn.classList.toggle('stop', !!s.running);
 
-  // 警告
-  const warn = document.getElementById('warn');
-  if (s.error) {
-    warn.textContent = s.error;
-    warn.classList.remove('hidden');
+  // 警告（用户主动提示的优先级高于状态推导，别被下一帧冲掉）
+  const warnEl = document.getElementById('warn');
+  if (Date.now() < warnSticky) {
+    // 用户主动提示还在有效期内，别覆盖
+    warnEl.classList.remove('hidden');
+  } else if (s.error) {
+    // 这里不能走 showWarn：每 120 ms 续一次粘性，错误消失了横幅还要挂 9 秒
+    document.getElementById('warnText').textContent = s.error;
+    warnEl.classList.remove('hidden');
   } else {
     const surround = (s.endpoints || []).filter((e) => e.surround);
     if (!s.running && surround.length === 0) {
-      warn.innerHTML =
+      document.getElementById('warnText').innerHTML =
         '<b>没有检测到 8 声道端点，游戏现在只输出立体声。</b>\n' +
-        '「分方向音量」需要 8 条独立声道才有可分的对象。装一个虚拟 7.1 端点（VB-CABLE，免费），' +
-        '并且必须在「声音设置 → 该设备 → 配置扬声器」里改成 <b>7.1 环绕</b> —— ' +
-        '装完默认是立体声，不改这一步游戏照样只输出 2 声道。';
-      warn.classList.remove('hidden');
+        '「分方向音量」需要 8 条独立声道才有可分的对象 —— 用下面的一键安装装 VB-CABLE，' +
+        '再到「声音设置 → 该设备 → 配置扬声器」改成 7.1。';
+      warnEl.classList.remove('hidden');
     } else {
-      warn.classList.add('hidden');
+      warnEl.classList.add('hidden');
     }
   }
 
@@ -198,6 +215,9 @@ function render() {
   fillSelect('selSink', s.endpoints, false);
   updateMeta();
   fillHrir();
+  fillPreset();
+  renderEq();
+  updateVb();
 
   // 指标
   document.getElementById('kBlock').textContent = s.status.block_ms.toFixed(1) + ' ms';
@@ -407,44 +427,96 @@ function drawRadar() {
   svg.innerHTML = g;
 }
 
-// ---------------------------------------------------------------- 预设
+// ---------------------------------------------------------------- 预设（下拉 + 自定义）
 
-const PRESETS = {
-  flat:   [0, 0, 0, 0, 0, 0, 0, 0],
-  // 压前方与中置、抬后方：脚步/换弹更突出（这是竞技最常用的一组）
-  tac:    [-3, -3, -7, 0, 12, 12, 4, 4],
-  // 中置与低频抬：对白与爆炸
-  cinema: [1, 1, 4, 6, 2, 2, 0, 0],
-  // 只听前方：后四路压到 -18，仍留一点方位感（不是彻底砍掉）
-  front:  [2, 2, 0, 0, -18, -18, -18, -18],
-  muteBack: [0, 0, -3, 0, MUTE_DB, MUTE_DB, MUTE_DB, MUTE_DB],
-};
+let presetSig = '';
 
-document.querySelectorAll('[data-preset]').forEach((b) => {
-  b.addEventListener('click', () => {
-    const arr = PRESETS[b.dataset.preset];
-    document.querySelectorAll('.ch').forEach((row, i) => {
-      const input = row.querySelector('input');
-      const db = arr[i];
-      const muteBtn = row.querySelector('.mute');
-      if (db <= MUTE_DB + 1) {
-        row.classList.add('muted');
-        muteBtn.classList.add('on');
-        muteBtn.textContent = '已静音';
-        input.value = DB_MIN;
-        row.querySelector('.db').textContent = '静音';
-      } else {
-        row.classList.remove('muted');
-        muteBtn.classList.remove('on');
-        muteBtn.textContent = '静音';
-        input.value = db;
-        row.querySelector('.db').textContent = fmt(db);
-      }
-      if (db > MUTE_DB + 1) savedGain[i] = db;
+async function postPreset(body) {
+  const r = await fetch('/api/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+    .then((x) => x.json())
+    .catch((e) => ({ ok: false, error: String(e) }));
+  if (!r.ok) {
+    showWarn(r.error || '预设操作失败');
+  } else {
+    document.getElementById('warn').classList.add('hidden');
+  }
+  return r;
+}
+
+function fillPreset() {
+  const sel = document.getElementById('selPreset');
+  const del = document.getElementById('btnPresetDel');
+  if (!sel || !state) return;
+  const list = state.presets || [];
+  const sig = list.map((p) => p.name + (p.builtin ? 'B' : 'U')).join('|');
+  if (sig !== presetSig) {
+    presetSig = sig;
+    sel.innerHTML = '';
+    list.forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.name;
+      // 自定的加个后缀，用户一眼能分清哪些是自己存的
+      o.textContent = p.builtin ? p.name : p.name + ' · 自定';
+      sel.appendChild(o);
     });
-    pushParams({ gains_db: arr.map((v) => (v <= MUTE_DB + 1 ? MUTE_DB : v)) });
-    drawRadar();
-  });
+  }
+  if (state.preset && document.activeElement !== sel) sel.value = state.preset;
+  const cur = list.find((p) => p.name === sel.value);
+  // 内置的删不掉 —— 直接禁用比点了报错更省事
+  if (del) {
+    del.disabled = !cur || cur.builtin;
+    del.style.opacity = del.disabled ? 0.4 : 1;
+    del.style.cursor = del.disabled ? 'not-allowed' : 'pointer';
+  }
+}
+
+document.getElementById('selPreset').addEventListener('change', async (e) => {
+  await postPreset({ action: 'apply', name: e.target.value });
+});
+
+const presetNameEl = document.getElementById('presetName');
+const presetOkEl = document.getElementById('btnPresetOk');
+
+document.getElementById('btnPresetSave').addEventListener('click', () => {
+  // 内联输入而不是 prompt()：prompt 在很多环境下被拦，而且样式无法与面板统一
+  const showing = !presetNameEl.hidden;
+  presetNameEl.hidden = showing;
+  presetOkEl.hidden = showing;
+  if (!showing) {
+    presetNameEl.value = (state && state.preset) || '';
+    presetNameEl.focus();
+    presetNameEl.select();
+  }
+});
+
+async function commitPreset() {
+  const name = presetNameEl.value.trim();
+  if (!name) {
+    presetNameEl.focus();
+    return;
+  }
+  await postPreset({ action: 'save', name, gains_db: collectGains() });
+  presetNameEl.hidden = true;
+  presetOkEl.hidden = true;
+}
+
+presetOkEl.addEventListener('click', commitPreset);
+presetNameEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') commitPreset();
+  if (e.key === 'Escape') {
+    presetNameEl.hidden = true;
+    presetOkEl.hidden = true;
+  }
+});
+
+document.getElementById('btnPresetDel').addEventListener('click', async () => {
+  const sel = document.getElementById('selPreset');
+  if (!sel.value) return;
+  await postPreset({ action: 'delete', name: sel.value });
 });
 
 // 总补偿
@@ -556,13 +628,141 @@ document.getElementById('btnRun').addEventListener('click', async () => {
     .then((x) => x.json())
     .catch((e) => ({ ok: false, error: String(e) }));
   btn.disabled = false;
-  const warn = document.getElementById('warn');
   const msg = r.error || r.warning;
-  if (msg) {
-    warn.textContent = msg;
-    warn.classList.remove('hidden');
-  }
+  if (msg) showWarn(msg);
 });
 
+// ---------------------------------------------------------------- 耳机 EQ
+
+const EQ_FREQS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
+function fmtHz(hz) {
+  return hz >= 1000 ? hz / 1000 + 'k' : String(hz);
+}
+
+function buildEq() {
+  const box = document.getElementById('eqBands');
+  if (!box || box.children.length) return;
+  EQ_FREQS.forEach((hz, i) => {
+    const d = document.createElement('div');
+    d.className = 'eqBand';
+    const db = document.createElement('div');
+    db.className = 'db';
+    db.textContent = '0';
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.min = -12;
+    inp.max = 12;
+    inp.step = 0.5;
+    inp.value = 0;
+    inp.dataset.band = i;
+    inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value);
+      db.textContent = (v > 0 ? '+' : '') + v.toFixed(1);
+      pushParams({ eq_db: collectEq() });
+    });
+    const h = document.createElement('div');
+    h.className = 'hz';
+    h.textContent = fmtHz(hz);
+    d.append(db, inp, h);
+    box.appendChild(d);
+  });
+}
+
+function collectEq() {
+  return [...document.querySelectorAll('#eqBands input')].map((el) => parseFloat(el.value));
+}
+
+function renderEq() {
+  if (!state || !state.params) return;
+  const g = state.params.eq_db || [];
+  const on = state.params.eq_on !== false;
+  const chk = document.getElementById('eqOn');
+  if (document.activeElement !== chk) chk.checked = on;
+  document.querySelectorAll('#eqBands input').forEach((el, i) => {
+    if (document.activeElement === el) return; // 拖动时不回写，否则跟手指打架
+    const v = g[i] ?? 0;
+    el.value = v;
+    el.parentElement.querySelector('.db').textContent =
+      (v > 0 ? '+' : '') + Number(v).toFixed(1);
+  });
+}
+
+document.getElementById('eqOn').addEventListener('change', (e) => {
+  pushParams({ eq_on: e.target.checked });
+});
+
+document.getElementById('btnEqFlat').addEventListener('click', () => {
+  document.querySelectorAll('#eqBands input').forEach((el) => {
+    el.value = 0;
+    el.parentElement.querySelector('.db').textContent = '0';
+  });
+  pushParams({ eq_db: new Array(EQ_FREQS.length).fill(0) });
+});
+
+// ---------------------------------------------------------------- VB-CABLE 前置
+
+function updateVb() {
+  const vb = (state && state.vbcable) || {};
+  const card = document.getElementById('vbCard');
+  if (!card) return;
+  const need = !vb.installed || !vb.surround;
+  card.classList.toggle('hidden', !need);
+  if (!need) return;
+
+  const btn = document.getElementById('btnVbInstall');
+  const title = card.querySelector('.vbBody > b');
+  const text = card.querySelector('.vbBody > p');
+  if (!vb.installed) {
+    btn.textContent = '一键安装 VB-CABLE';
+    btn.dataset.mode = 'install';
+    title.textContent = '还差一步：VB-CABLE 虚拟声卡';
+    text.innerHTML =
+      '「单独调每个方向」的前提是游戏输出 <b>8 条独立声道</b>。没有虚拟 7.1 端点时，' +
+      '系统只会给一条已经混好的立体声，8 个推子就退化成 1 个总音量。' +
+      '装完还要在「声音设置 → 该设备 → 配置扬声器」里选 <b>7.1 环绕</b> —— 默认是立体声。';
+  } else {
+    btn.textContent = '打开声音设置';
+    btn.dataset.mode = 'guide';
+    title.textContent = 'VB-CABLE 已装，但还没配成 7.1';
+    text.innerHTML =
+      '现在已经能选到 CABLE Input，但它还是 <b>2 声道</b>。' +
+      '去「声音设置 → 声音控制面板 → CABLE Input → 配置扬声器」选 <b>7.1 环绕</b>，' +
+      '回来点「刷新设备」即可。不改这一步，游戏照样只输出 2 声道。';
+  }
+}
+
+document.getElementById('btnVbInstall').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  if (btn.dataset.mode === 'guide') {
+    fetch('/api/setup-guide', { method: 'POST' }).catch(() => {});
+    return;
+  }
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '正在启动安装…';
+  const r = await fetch('/api/vbcable/install', { method: 'POST' })
+    .then((x) => x.json())
+    .catch(() => ({ ok: false, error: '请求失败' }));
+  btn.disabled = false;
+  btn.textContent = old;
+  if (r.ok) {
+    showWarn(
+      '已启动 VB-CABLE 安装程序：在弹出的窗口里点 Install（需要允许管理员权限），' +
+        '装完重启电脑，回到本页点「刷新设备」，再把端点配成 7.1。'
+    );
+  } else {
+    showWarn(r.error || '安装程序启动失败');
+  }
+  updateVb();
+});
+
+for (const id of ['btnVbGuide', 'btnGuide']) {
+  document.getElementById(id).addEventListener('click', () => {
+    fetch('/api/setup-guide', { method: 'POST' }).catch(() => {});
+  });
+}
+
+buildEq();
 drawRadar();
 poll();
