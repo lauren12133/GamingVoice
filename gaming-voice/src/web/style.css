@@ -120,8 +120,28 @@ button.chip.sq{padding:7px 10px;font-size:12.5px;font-family:var(--mono)}
   background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn);
   border-radius:11px;padding:12px 15px;font-size:13.5px;line-height:1.7;
   margin-bottom:16px;white-space:pre-wrap;
+  display:flex;align-items:flex-start;gap:12px;
 }
 .warn b{font-weight:700}
+/* 「设置引导」钉在横幅最右侧：报错时最需要的是下一步做什么，不是再读一遍错误 */
+.warn #warnText{flex:1;min-width:0}
+.warnBtn{
+  flex:0 0 auto;align-self:flex-start;
+  background:transparent;border:1px solid currentColor;color:inherit;
+  border-radius:8px;padding:5px 11px;font-size:12.5px;white-space:nowrap;opacity:.85;
+}
+.warnBtn:hover{opacity:1}
+
+/* ---------------- VB-CABLE 安装卡 ---------------- */
+.vbCard{
+  display:flex;gap:16px;align-items:center;flex-wrap:wrap;
+  background:var(--card);border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow);
+}
+.vbBody{flex:1;min-width:280px}
+.vbBody>b{display:block;font-size:14px;margin-bottom:6px;color:var(--txt)}
+.vbBody p{margin:0;font-size:12.5px;line-height:1.75;color:var(--dim)}
+.vbActions{display:flex;gap:8px;flex-wrap:wrap}
 .hidden{display:none}
 
 /* ---------------- 设备区 ---------------- */
@@ -172,9 +192,155 @@ main{display:grid;grid-template-columns:1fr 352px;gap:16px;align-items:start}
   padding:14px 18px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap;
 }
 .panelHead h2{margin:0;font-size:14px;font-weight:650;color:var(--txt);letter-spacing:.3px}
-.presets{display:flex;gap:7px;flex-wrap:wrap}
+.presets{display:flex;gap:7px;flex-wrap:nowrap;align-items:center;flex:0 0 auto}
+.panelHead{align-items:center;gap:12px}
+.panelHead h2{white-space:nowrap}
 .presets button{padding:6px 11px;font-size:12.5px;border-radius:8px;color:var(--dim)}
 .presets button:hover{color:var(--txt)}
+.presets select{padding:6px 30px 6px 10px;font-size:12.5px;border-radius:8px;min-width:126px}
+.presets input{
+  padding:6px 10px;font-size:12.5px;border-radius:8px;width:132px;
+  background:var(--card2);border:1px solid var(--line);color:var(--txt);font-family:inherit;
+}
+
+/* ---------------- 标签页（声音增益 / EQ 调整） ---------------- */
+.tabs{
+  display:flex;gap:6px;padding:5px;margin:0 0 16px;width:max-content;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  box-shadow:var(--shadow);
+}
+.tab{
+  padding:7px 22px;font-size:13.5px;font-weight:500;border-radius:8px;
+  background:transparent;border:1px solid transparent;color:var(--dim);
+}
+.tab:hover{color:var(--txt);background:var(--btn)}
+.tab.on{
+  background:var(--card2);border-color:var(--line);color:var(--acc);
+  box-shadow:inset 0 0 0 1px #34d39922;
+}
+:root[data-theme="light"] .tab.on{box-shadow:inset 0 0 0 1px #0f9d6f22}
+
+.tabPage{animation:pageIn .16s ease-out}
+@keyframes pageIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* ---------------- 耳机 EQ ---------------- */
+.eqPanel{padding:16px 18px}
+.panelHead h2 em{font-style:normal;font-size:11.5px;color:var(--dim2);margin-left:8px;font-weight:400}
+.eqTools{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.chk{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim);cursor:pointer}
+.chk input{accent-color:var(--acc);cursor:pointer}
+
+.eqChartWrap{margin:4px 0 12px}
+#eqChart{display:block;width:100%;height:auto;touch-action:none;user-select:none}
+/* 总开关关掉时压暗：参数还在，但耳朵听不到，别让人以为调了没反应 */
+#eqChart.off{opacity:.4;filter:saturate(.35)}
+#eqChart .egrid{fill:none;stroke:var(--grid);stroke-width:1;vector-effect:non-scaling-stroke}
+#eqChart .egrid.zero{stroke:var(--dim2);opacity:.7}
+#eqChart .etext{fill:var(--dim2);font-size:11px;font-family:var(--mono)}
+#eqChart .etext.axis{fill:var(--dim);font-size:11.5px}
+#eqChart .ecurve{
+  fill:none;stroke:var(--acc);stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round;
+  vector-effect:non-scaling-stroke;
+}
+#eqChart .efill{fill:url(#eqGrad);stroke:none}
+/* 渐变端点用 CSS 控制颜色，不用 SVG 属性 —— presentation attribute 里写 var() 各家行为不一致 */
+#eqChart .eg0{stop-color:var(--acc);stop-opacity:.26}
+#eqChart .eg1{stop-color:var(--acc);stop-opacity:0}
+#eqChart .edot{stroke:var(--card);stroke-width:2;cursor:grab;vector-effect:non-scaling-stroke}
+#eqChart .edot.peak{fill:var(--acc)}
+#eqChart .edot.shelf{fill:var(--acc2)}
+#eqChart .edot.cut{fill:var(--amber)}
+#eqChart .edot.sel{stroke:var(--txt);cursor:grabbing}
+#eqChart .ehit{fill:transparent;cursor:crosshair}
+
+.eqChartBar{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:2px 2px 0;font-size:12px;color:var(--dim2);
+}
+.eqLegend{display:flex;align-items:center}
+.eqLegend .sw{width:9px;height:9px;border-radius:50%;display:inline-block;margin:0 5px 0 10px}
+.eqLegend .sw:first-child{margin-left:0}
+.sw.peak{background:var(--acc)}
+.sw.shelf{background:var(--acc2)}
+.sw.cut{background:var(--amber)}
+.eqHint{flex:1;min-width:220px;line-height:1.6}
+.eqSum{font-family:var(--mono);color:var(--acc2);font-variant-numeric:tabular-nums}
+
+/* ---------------- EQ 频点表 ---------------- */
+.eqTable{display:flex;flex-direction:column;gap:5px;margin-top:12px}
+#eqRows{display:flex;flex-direction:column;gap:5px;max-height:472px;overflow-y:auto;padding-right:4px}
+#eqRows::-webkit-scrollbar{width:8px}
+#eqRows::-webkit-scrollbar-thumb{background:var(--track);border-radius:4px}
+
+.eqRow{
+  display:grid;grid-template-columns:26px 104px 96px 78px minmax(150px,1fr) 32px;
+  align-items:center;gap:10px;
+}
+.eqRowHead{font-size:11.5px;color:var(--dim2);padding:0 8px 2px;letter-spacing:.3px}
+.eqBandRow{
+  padding:6px 8px;border-radius:9px;
+  background:var(--card2);border:1px solid var(--line-soft);transition:border-color .12s;
+}
+.eqBandRow:hover{border-color:var(--line)}
+.eqBandRow.sel{border-color:var(--acc);background:var(--card)}
+
+.c-idx{
+  font-family:var(--mono);font-size:11.5px;color:var(--dim2);text-align:center;
+  width:20px;height:20px;line-height:19px;border-radius:50%;border:1px solid var(--line);
+}
+.eqBandRow.sel .c-idx{color:var(--acc);border-color:var(--acc)}
+
+.eqRow input[type=number],.eqRow select{
+  width:100%;padding:6px 8px;font-size:12.5px;border-radius:7px;
+  background:var(--card);border:1px solid var(--line);color:var(--txt);font-family:inherit;
+}
+.eqRow select{padding-right:4px;cursor:pointer}
+.eqRow input[type=number]{
+  font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums;
+  -moz-appearance:textfield;
+}
+.eqRow input[type=number]::-webkit-inner-spin-button,
+.eqRow input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.eqRow input:focus,.eqRow select:focus{outline:none;border-color:var(--acc)}
+.eqRow input:disabled{opacity:.35;cursor:not-allowed}
+
+/* 增益单元：滑条 + 数字框。
+   滑条一律**横向** —— 之前那套 writing-mode 竖推子在 Chromium 里
+   thumb 与轨道的坐标原点不一致，滑块会整体偏离手指位置。 */
+.c-gain{display:flex;align-items:center;gap:10px;min-width:0}
+.c-gain input[type=range]{
+  -webkit-appearance:none;appearance:none;flex:1;min-width:0;
+  height:22px;margin:0;background:transparent;cursor:pointer;
+}
+.c-gain input[type=range]::-webkit-slider-runnable-track{
+  height:6px;border-radius:3px;background:var(--track);
+}
+/* thumb 16px、轨道 6px → margin-top = (6-16)/2 = -5px，两者中心才重合 */
+.c-gain input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:16px;height:16px;margin-top:-5px;border-radius:50%;
+  background:#f2f8ff;border:2px solid var(--acc);box-shadow:0 1px 5px #00000055;
+}
+:root[data-theme="light"] .c-gain input[type=range]::-webkit-slider-thumb{
+  background:#fff;box-shadow:0 1px 4px #22303f44;
+}
+.c-gain input[type=range]::-moz-range-track{height:6px;border-radius:3px;background:var(--track)}
+.c-gain input[type=range]::-moz-range-thumb{
+  width:14px;height:14px;border-radius:50%;background:#f2f8ff;border:2px solid var(--acc);
+}
+.c-gain input[type=range]:disabled{cursor:not-allowed;opacity:.4}
+.c-gain input[type=number]{width:66px;flex:0 0 auto}
+
+.delBtn{
+  width:28px;height:28px;padding:0;border-radius:7px;border:1px solid transparent;
+  background:var(--btn);color:var(--dim2);font-size:16px;line-height:1;
+  display:grid;place-items:center;
+}
+.delBtn:hover{color:var(--warn);border-color:var(--warn-line);background:#a33b3b18}
+
+.eqEmpty{
+  margin:14px 4px;padding:18px;text-align:center;font-size:12.5px;color:var(--dim2);
+  border:1px dashed var(--line);border-radius:10px;
+}
 
 .tag{
   font-size:11.5px;padding:3px 9px;border-radius:999px;
@@ -296,6 +462,22 @@ footer{
 @media(max-width:920px){
   main{grid-template-columns:1fr}
   .wrap{padding:20px 16px 36px}
+  .eqRow{grid-template-columns:24px 92px 84px 68px minmax(110px,1fr) 30px;gap:8px}
+}
+@media(max-width:760px){
+  /* 曲线在 390px 宽下会被压成一条缝（viewBox 等比缩放），
+     改成让图表在自己的容器里横向滚动，比缩到看不清强。 */
+  .eqChartWrap{overflow-x:auto;overflow-y:hidden}
+  #eqChart{min-width:720px}
+  /* 窄屏：一行拆成三行，滑条单独占满 */
+  .eqRowHead{display:none}
+  .eqRow{grid-template-columns:22px 1fr 1fr 30px;row-gap:7px}
+  .eqRow .c-idx{grid-column:1;grid-row:1}
+  .eqRow .c-kind{grid-column:2/4;grid-row:1}
+  .eqRow .c-del{grid-column:4;grid-row:1}
+  .eqRow .c-freq{grid-column:2/3;grid-row:2}
+  .eqRow .c-q{grid-column:3/4;grid-row:2}
+  .eqRow .c-gain{grid-column:2/5;grid-row:3}
 }
 @media(max-width:640px){
   .devices{grid-template-columns:1fr}
@@ -306,4 +488,6 @@ footer{
   .ch .nm b{font-size:14px}
   .names h1{font-size:18px}
   .sub{display:none}
+  .tab{padding:7px 14px;font-size:13px}
+  .eqToolText{display:none}
 }

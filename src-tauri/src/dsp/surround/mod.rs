@@ -26,6 +26,7 @@
 //! 进出一律 480 样本；采样率恒为 `audio::SAMPLE_RATE`。
 
 pub mod conv;
+pub mod eq;
 pub mod hrir;
 pub mod latency;
 pub mod layout;
@@ -37,6 +38,8 @@ pub use hrir::Hrir;
 pub use latency::{Chain, LatencyModel, Preset, Verdict};
 pub use layout::{Speaker, CHANNELS};
 pub use spatial::{Spatial, SpatialParams, Upmix};
+
+pub use eq::Eq;
 
 use crate::audio::{HOP, SAMPLE_RATE};
 
