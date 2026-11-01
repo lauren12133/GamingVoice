@@ -633,72 +633,531 @@ document.getElementById('btnRun').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- 耳机 EQ
+//
+// 这里的每个频点是一条 biquad，参数和 Rust 侧 `dsp/surround/eq.rs` 必须一模一样：
+// 界面画的曲线是**算**出来的，不是采样回来的。两边公式一旦分叉，用户看到的和听到的就是两回事。
 
-const EQ_FREQS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const EQ_MIN_FREQ = 20;
+const EQ_MAX_FREQ = 20000;
+const EQ_MIN_Q = 0.1;
+const EQ_MAX_Q = 18;
+const EQ_MAX_DB = 12;
+// 上限以后端 `eq::MAX_BANDS` 为准，这里只是首帧（state 还没到）的占位
+let EQ_MAX_BANDS = 16;
+const EQ_DEFAULT_FREQS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
-function fmtHz(hz) {
-  return hz >= 1000 ? hz / 1000 + 'k' : String(hz);
+const EQ_KINDS = [
+  { v: 'peak', cn: '峰值 Peak', cls: 'peak', gain: true },
+  { v: 'lowshelf', cn: '低架 LowShelf', cls: 'shelf', gain: true },
+  { v: 'highshelf', cn: '高架 HighShelf', cls: 'shelf', gain: true },
+  { v: 'highpass', cn: '高通 HighPass', cls: 'cut', gain: false },
+  { v: 'lowpass', cn: '低通 LowPass', cls: 'cut', gain: false },
+];
+const eqKind = (t) => EQ_KINDS.find((k) => k.v === t) || EQ_KINDS[0];
+
+/** 数字 → 短字符串：去掉二进制浮点留下的 1.4099999 这种尾巴。 */
+const eqNum = (v, digits) => String(Number(Number(v).toFixed(digits)));
+
+// 曲线几何：viewBox 固定 1100×300，等比缩到容器宽度
+const EQ_W = 1100;
+const EQ_H = 300;
+const EQ_L = 44;
+const EQ_R = 14;
+const EQ_T = 16;
+const EQ_B = 26;
+const EQ_PW = EQ_W - EQ_L - EQ_R;
+const EQ_PH = EQ_H - EQ_T - EQ_B;
+const EQ_DB_RANGE = 15;
+
+const SR = 48000;
+
+const eqF2X = (hz) => {
+  const lo = Math.log10(EQ_MIN_FREQ);
+  const hi = Math.log10(EQ_MAX_FREQ);
+  const f = Math.min(EQ_MAX_FREQ, Math.max(EQ_MIN_FREQ, hz));
+  return EQ_L + ((Math.log10(f) - lo) / (hi - lo)) * EQ_PW;
+};
+const eqX2F = (x) => {
+  const lo = Math.log10(EQ_MIN_FREQ);
+  const hi = Math.log10(EQ_MAX_FREQ);
+  const t = Math.min(1, Math.max(0, (x - EQ_L) / EQ_PW));
+  return Math.pow(10, lo + t * (hi - lo));
+};
+const eqDb2Y = (db) => EQ_T + (EQ_PH / 2) * (1 - db / EQ_DB_RANGE);
+const eqY2Db = (y) => ((EQ_T + EQ_PH / 2 - y) / (EQ_PH / 2)) * EQ_DB_RANGE;
+
+let eqBands = [];
+let eqEditAt = 0;      // 最近一次本地编辑（用来压制远端覆盖）
+let eqRowSig = '';     // 表格结构签名（只有数量变了才重建 DOM）
+let eqDrawSig = '';    // 曲线签名（没变就不重画）
+let eqDrag = -1;       // 正在拖的频点下标
+
+const eqCanon = (b) =>
+  [b.type, Number(b.freq).toFixed(1), Number(b.q).toFixed(3), Number(b.gain).toFixed(2)].join(':');
+
+/** RBJ Audio EQ Cookbook —— 与 `eq.rs` 的 `Biquad::compute` 逐行对应。 */
+function eqBiquad(b) {
+  const f0 = Math.min(EQ_MAX_FREQ, Math.max(EQ_MIN_FREQ, b.freq), SR * 0.49);
+  const w0 = (2 * Math.PI * f0) / SR;
+  const cs = Math.cos(w0);
+  const sn = Math.sin(w0);
+  const q = Math.min(EQ_MAX_Q, Math.max(EQ_MIN_Q, b.q));
+  const alpha = sn / (2 * q);
+  const A = Math.pow(10, b.gain / 40);
+  const shelfQ = Math.min(4, Math.max(0.3, q));
+  const k = (2 * Math.sqrt(A) * sn) / (2 * shelfQ);
+  let b0, b1, b2, a0, a1, a2;
+
+  switch (b.type) {
+    case 'lowshelf':
+      b0 = A * (A + 1 - (A - 1) * cs + k);
+      b1 = 2 * A * (A - 1 - (A + 1) * cs);
+      b2 = A * (A + 1 - (A - 1) * cs - k);
+      a0 = A + 1 + (A - 1) * cs + k;
+      a1 = -2 * (A - 1 + (A + 1) * cs);
+      a2 = A + 1 + (A - 1) * cs - k;
+      break;
+    case 'highshelf':
+      b0 = A * (A + 1 + (A - 1) * cs + k);
+      b1 = -2 * A * (A - 1 + (A + 1) * cs);
+      b2 = A * (A + 1 + (A - 1) * cs - k);
+      a0 = A + 1 - (A - 1) * cs + k;
+      a1 = 2 * (A - 1 - (A + 1) * cs);
+      a2 = A + 1 - (A - 1) * cs - k;
+      break;
+    case 'lowpass':
+      b0 = (1 - cs) / 2;
+      b1 = 1 - cs;
+      b2 = (1 - cs) / 2;
+      a0 = 1 + alpha;
+      a1 = -2 * cs;
+      a2 = 1 - alpha;
+      break;
+    case 'highpass':
+      b0 = (1 + cs) / 2;
+      b1 = -(1 + cs);
+      b2 = (1 + cs) / 2;
+      a0 = 1 + alpha;
+      a1 = -2 * cs;
+      a2 = 1 - alpha;
+      break;
+    default:
+      b0 = 1 + alpha * A;
+      b1 = -2 * cs;
+      b2 = 1 - alpha * A;
+      a0 = 1 + alpha / A;
+      a1 = -2 * cs;
+      a2 = 1 - alpha / A;
+  }
+  const inv = Math.abs(a0) < 1e-12 ? 0 : 1 / a0;
+  return { b0: b0 * inv, b1: b1 * inv, b2: b2 * inv, a1: a1 * inv, a2: a2 * inv };
 }
 
-function buildEq() {
-  const box = document.getElementById('eqBands');
-  if (!box || box.children.length) return;
-  EQ_FREQS.forEach((hz, i) => {
-    const d = document.createElement('div');
-    d.className = 'eqBand';
-    const db = document.createElement('div');
-    db.className = 'db';
-    db.textContent = '0';
-    const inp = document.createElement('input');
-    inp.type = 'range';
-    inp.min = -12;
-    inp.max = 12;
-    inp.step = 0.5;
-    inp.value = 0;
-    inp.dataset.band = i;
-    inp.addEventListener('input', () => {
-      const v = parseFloat(inp.value);
-      db.textContent = (v > 0 ? '+' : '') + v.toFixed(1);
-      pushParams({ eq_db: collectEq() });
-    });
-    const h = document.createElement('div');
-    h.className = 'hz';
-    h.textContent = fmtHz(hz);
-    d.append(db, inp, h);
-    box.appendChild(d);
+/** 二阶节在 hz 处的幅度（dB）。系数已按 a0 归一化。 */
+function eqMagDb(c, hz) {
+  const w = (2 * Math.PI * hz) / SR;
+  const cw = Math.cos(w);
+  const sw = Math.sin(w);
+  const c2 = Math.cos(2 * w);
+  const s2 = Math.sin(2 * w);
+  const nr = c.b0 + c.b1 * cw + c.b2 * c2;
+  const ni = -(c.b1 * sw + c.b2 * s2);
+  const dr = 1 + c.a1 * cw + c.a2 * c2;
+  const di = -(c.a1 * sw + c.a2 * s2);
+  const num = nr * nr + ni * ni;
+  const den = dr * dr + di * di;
+  return 10 * Math.log10(num / Math.max(den, 1e-20));
+}
+
+/** 整条链在 hz 处的总响应。 */
+function eqResponse(hz) {
+  let sum = 0;
+  for (const b of eqBands) sum += eqMagDb(eqBiquad(b), hz);
+  return sum;
+}
+
+// ---------------------------------------------------------------- 曲线
+
+function drawEqChart(force) {
+  const svg = document.getElementById('eqChart');
+  if (!svg) return;
+  const sig =
+    eqBands.map(eqCanon).join('|') +
+    '#' +
+    eqDrag +
+    '#' +
+    (document.documentElement.dataset.theme || '');
+  if (!force && sig === eqDrawSig) return;
+  eqDrawSig = sig;
+
+  let g = '';
+
+  // 竖向网格（频率）
+  const freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+  const fLabel = { 20: '20', 50: '50', 100: '100', 200: '200', 500: '500', 1000: '1k' };
+  for (const f of freqs) {
+    const x = eqF2X(f).toFixed(1);
+    g += `<line class="egrid" x1="${x}" y1="${EQ_T}" x2="${x}" y2="${EQ_T + EQ_PH}"/>`;
+    const tx = f >= 1000 ? f / 1000 + 'k' : fLabel[f] || f;
+    g += `<text class="etext" x="${x}" y="${EQ_T + EQ_PH + 16}" text-anchor="middle">${tx}</text>`;
+  }
+
+  // 横向网格（dB）
+  for (const db of [-12, -6, 0, 6, 12]) {
+    const y = eqDb2Y(db).toFixed(1);
+    const zero = db === 0 ? ' zero' : '';
+    g += `<line class="egrid${zero}" x1="${EQ_L}" y1="${y}" x2="${EQ_L + EQ_PW}" y2="${y}"/>`;
+    const t = (db > 0 ? '+' : '') + db;
+    g += `<text class="etext axis" x="${EQ_L - 8}" y="${Number(y) + 4}" text-anchor="end">${t}</text>`;
+  }
+  g += `<text class="etext axis" x="${EQ_L - 8}" y="${EQ_T + 10}" text-anchor="end">dB</text>`;
+
+  // 曲线
+  const N = 320;
+  const pts = [];
+  let mx = -99;
+  let mn = 99;
+  for (let i = 0; i <= N; i++) {
+    const x = EQ_L + (EQ_PW * i) / N;
+    const hz = eqX2F(x);
+    // 超过 Nyquist 的部分不画：48 kHz 下 24 k 以上没有意义，曲线在那里会乱跳
+    const db = hz >= SR / 2 ? null : eqResponse(hz);
+    if (db !== null) {
+      mx = Math.max(mx, db);
+      mn = Math.min(mn, db);
+      pts.push([x, eqDb2Y(Math.max(-EQ_DB_RANGE, Math.min(EQ_DB_RANGE, db)))]);
+    }
+  }
+  if (pts.length) {
+    const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+    const base = eqDb2Y(0).toFixed(1);
+    g += `<polygon class="efill" points="${EQ_L},${base} ${line} ${(
+      EQ_L + EQ_PW
+    ).toFixed(1)},${base}"/>`;
+    g += `<polyline class="ecurve" points="${line}"/>`;
+  }
+
+  // 空白处的双击热区要画在**圆点下面**：SVG 没有 z-index，后画的在上。
+  // 之前它画在最后，把所有圆点盖住了 —— 点哪儿都命中矩形，拖不动。
+  g += `<rect class="ehit" x="${EQ_L}" y="${EQ_T}" width="${EQ_PW}" height="${EQ_PH}"/>`;
+
+  // 频点标记：位置上就是这个频点的真实响应点（架式在半坡、高通在拐点），
+  // 拖动时手指和曲线对得上，不用心算。
+  eqBands.forEach((b, i) => {
+    const x = eqF2X(b.freq);
+    const db = eqResponse(b.freq);
+    const y = eqDb2Y(Math.max(-EQ_DB_RANGE, Math.min(EQ_DB_RANGE, db)));
+    const k = eqKind(b.type);
+    const sel = i === eqDrag ? ' sel' : '';
+    g += `<circle class="edot ${k.cls}${sel}" data-i="${i}" cx="${x.toFixed(1)}"
+      cy="${y.toFixed(1)}" r="9"/>`;
+  });
+
+  svg.innerHTML = `<defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop class="eg0" offset="0%"/>
+      <stop class="eg1" offset="100%"/>
+    </linearGradient></defs>` + g;
+
+  const sum = document.getElementById('eqSum');
+  if (sum) {
+    const flat = eqBands.every((b) => eqKind(b.type).gain && Math.abs(b.gain) < 1e-4);
+    sum.textContent = flat
+      ? '平直 · 直通'
+      : `峰值 ${mx > 0 ? '+' : ''}${mx.toFixed(1)} dB · 谷值 ${mn.toFixed(1)} dB`;
+  }
+}
+
+// ---------------------------------------------------------------- 频点表
+
+function ensureEqRows() {
+  const host = document.getElementById('eqRows');
+  if (!host) return;
+  const sig = String(eqBands.length);
+  if (sig !== eqRowSig) {
+    eqRowSig = sig;
+    host.innerHTML = '';
+    eqBands.forEach((b, i) => host.appendChild(eqRowEl(i)));
+  }
+  document.getElementById('eqEmpty').classList.toggle('hidden', eqBands.length > 0);
+  syncEqValues();
+}
+
+function eqRowEl(i) {
+  const row = document.createElement('div');
+  row.className = 'eqBandRow eqRow';
+
+  const idx = document.createElement('span');
+  idx.className = 'c-idx';
+  idx.textContent = String(i + 1);
+
+  const sel = document.createElement('select');
+  sel.className = 'c-kind';
+  EQ_KINDS.forEach((k) => {
+    const o = document.createElement('option');
+    o.value = k.v;
+    o.textContent = k.cn;
+    sel.appendChild(o);
+  });
+
+  const freq = document.createElement('input');
+  freq.className = 'c-freq';
+  freq.type = 'number';
+  freq.min = EQ_MIN_FREQ;
+  freq.max = EQ_MAX_FREQ;
+  freq.step = 'any';
+  freq.title = '中心/拐点频率（20–20000 Hz）';
+
+  const q = document.createElement('input');
+  q.className = 'c-q';
+  q.type = 'number';
+  q.min = EQ_MIN_Q;
+  q.max = EQ_MAX_Q;
+  q.step = 'any';
+  q.title = 'Q 值（0.1–18）：越大越窄';
+
+  const gainBox = document.createElement('div');
+  gainBox.className = 'c-gain';
+  const gr = document.createElement('input');
+  gr.type = 'range';
+  gr.min = -EQ_MAX_DB;
+  gr.max = EQ_MAX_DB;
+  gr.step = 0.5;
+  gr.className = 'gR';
+  const gn = document.createElement('input');
+  gn.type = 'number';
+  gn.className = 'gN';
+  gn.min = -EQ_MAX_DB;
+  gn.max = EQ_MAX_DB;
+  gn.step = 0.5;
+  gn.title = '增益（dB），可直接输入';
+  gainBox.append(gr, gn);
+
+  const del = document.createElement('button');
+  del.className = 'delBtn';
+  del.textContent = '×';
+  del.title = '删除这个频点';
+
+  // ---- 事件：改哪个字段就只改哪个字段，其余保持 ----
+  sel.addEventListener('change', () => {
+    eqBands[i].type = sel.value;
+    // 高通/低通不吃增益：控件置灰（值保留，切回峰/架式还在）。
+    // 不禁用的话用户会拖着滑条纳闷为什么曲线不动。
+    syncEqValues();
+    eqCommit();
+  });
+
+  const commitNum = (el, key, lo, hi, digits) => {
+    const v = parseFloat(el.value);
+    if (!Number.isFinite(v)) {
+      el.value = eqNum(eqBands[i][key], digits);
+      return;
+    }
+    eqBands[i][key] = Math.min(hi, Math.max(lo, Number(v.toFixed(digits))));
+    el.value = eqNum(eqBands[i][key], digits);
+    eqCommit();
+  };
+  freq.addEventListener('change', () => commitNum(freq, 'freq', EQ_MIN_FREQ, EQ_MAX_FREQ, 1));
+  q.addEventListener('change', () => commitNum(q, 'q', EQ_MIN_Q, EQ_MAX_Q, 2));
+  gn.addEventListener('change', () => commitNum(gn, 'gain', -EQ_MAX_DB, EQ_MAX_DB, 1));
+
+  // 滑条：拖动过程实时下发（40 ms 合并），松手不回弹
+  gr.addEventListener('input', () => {
+    eqBands[i].gain = parseFloat(gr.value);
+    gn.value = eqNum(eqBands[i].gain, 1);
+    eqCommit(false);
+  });
+
+  del.addEventListener('click', () => {
+    eqBands.splice(i, 1);
+    eqRowSig = '';
+    eqCommit();
+  });
+
+  row.append(idx, sel, freq, q, gainBox, del);
+  return row;
+}
+
+/** 把 eqBands 写回控件。正在输入的框不覆盖，否则打字会被打断。 */
+function syncEqValues() {
+  document.querySelectorAll('#eqRows .eqBandRow').forEach((row, i) => {
+    const b = eqBands[i];
+    if (!b) return;
+    const act = document.activeElement;
+    const sel = row.querySelector('.c-kind');
+    if (act !== sel) sel.value = b.type;
+    const freq = row.querySelector('.c-freq');
+    if (act !== freq) freq.value = eqNum(b.freq, 1);
+    const q = row.querySelector('.c-q');
+    if (act !== q) q.value = eqNum(b.q, 2);
+    const usesGain = eqKind(b.type).gain;
+    const gr = row.querySelector('.gR');
+    const gn = row.querySelector('.gN');
+    gr.disabled = !usesGain;
+    gn.disabled = !usesGain;
+    if (act !== gr) gr.value = b.gain;
+    if (act !== gn) gn.value = eqNum(b.gain, 1);
+    row.classList.toggle('sel', i === eqDrag);
   });
 }
 
-function collectEq() {
-  return [...document.querySelectorAll('#eqBands input')].map((el) => parseFloat(el.value));
-}
-
-function renderEq() {
-  if (!state || !state.params) return;
-  const g = state.params.eq_db || [];
-  const on = state.params.eq_on !== false;
-  const chk = document.getElementById('eqOn');
-  if (document.activeElement !== chk) chk.checked = on;
-  document.querySelectorAll('#eqBands input').forEach((el, i) => {
-    if (document.activeElement === el) return; // 拖动时不回写，否则跟手指打架
-    const v = g[i] ?? 0;
-    el.value = v;
-    el.parentElement.querySelector('.db').textContent =
-      (v > 0 ? '+' : '') + Number(v).toFixed(1);
+/** 提交一次改动：立即重画 + 合并下发。 */
+function eqCommit(redraw = true) {
+  eqEditAt = Date.now();
+  if (redraw) drawEqChart();
+  pushParams({
+    eq_bands: eqBands.map((b) => ({
+      type: b.type,
+      freq: b.freq,
+      q: b.q,
+      gain: b.gain,
+    })),
   });
 }
 
-document.getElementById('eqOn').addEventListener('change', (e) => {
-  pushParams({ eq_on: e.target.checked });
+function addEqBand(freq) {
+  if (eqBands.length >= EQ_MAX_BANDS) {
+    showWarn(`最多 ${EQ_MAX_BANDS} 个频点。再多曲线会叠到没法调，先删几个。`);
+    return;
+  }
+  eqBands.push({
+    type: 'peak',
+    freq: Math.min(EQ_MAX_FREQ, Math.max(EQ_MIN_FREQ, Math.round(freq))),
+    q: 1.41,
+    gain: 0,
+  });
+  eqRowSig = '';
+  ensureEqRows();
+  eqCommit();
+  // 新增的点在末行，滚过去，不然用户以为没加上
+  const host = document.getElementById('eqRows');
+  host.scrollTop = host.scrollHeight;
+}
+
+// ---------------------------------------------------------------- 曲线交互
+
+(function bindEqChart() {
+  const svg = document.getElementById('eqChart');
+  if (!svg) return;
+
+  const toVB = (e) => {
+    const r = svg.getBoundingClientRect();
+    return {
+      x: ((e.clientX - r.left) / r.width) * EQ_W,
+      y: ((e.clientY - r.top) / r.height) * EQ_H,
+    };
+  };
+
+  svg.addEventListener('pointerdown', (e) => {
+    const dot = e.target.closest ? e.target.closest('.edot') : null;
+    if (!dot) {
+      if (eqDrag >= 0) {
+        eqDrag = -1;
+        syncEqValues();
+        drawEqChart();
+      }
+      return;
+    }
+    eqDrag = Number(dot.dataset.i);
+    syncEqValues();
+    drawEqChart();
+    if (svg.setPointerCapture) svg.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  svg.addEventListener('pointermove', (e) => {
+    if (eqDrag < 0) return;
+    const b = eqBands[eqDrag];
+    if (!b) {
+      eqDrag = -1;
+      return;
+    }
+    const p = toVB(e);
+    const hz = eqX2F(p.x);
+    // 频率按 1 Hz 取整；10 Hz 以下保留小数点没有意义，直接四舍五入
+    b.freq = Math.min(EQ_MAX_FREQ, Math.max(EQ_MIN_FREQ, Math.round(hz)));
+    if (eqKind(b.type).gain) {
+      const db = eqY2Db(p.y);
+      b.gain = Math.min(EQ_MAX_DB, Math.max(-EQ_MAX_DB, Math.round(db * 2) / 2));
+    }
+    syncEqValues();
+    drawEqChart();
+    eqCommit(false);
+    e.preventDefault();
+  });
+
+  const stop = () => {
+    if (eqDrag < 0) return;
+    eqDrag = -1;
+    syncEqValues();
+    drawEqChart();
+  };
+  svg.addEventListener('pointerup', stop);
+  svg.addEventListener('pointercancel', stop);
+
+  // 空白处双击加频点：在什么频率上双击就加在什么频率，不用先去表里改数字
+  svg.addEventListener('dblclick', (e) => {
+    if (e.target.closest && e.target.closest('.edot')) return;
+    const p = toVB(e);
+    if (p.x < EQ_L || p.x > EQ_L + EQ_PW || p.y < EQ_T || p.y > EQ_T + EQ_PH) return;
+    addEqBand(eqX2F(p.x));
+  });
+})();
+
+document.getElementById('btnEqAdd').addEventListener('click', () => {
+  // 默认加在曲线最高点的位置没有意义；给一个不容易打架的中频
+  addEqBand(1000);
 });
 
 document.getElementById('btnEqFlat').addEventListener('click', () => {
-  document.querySelectorAll('#eqBands input').forEach((el) => {
-    el.value = 0;
-    el.parentElement.querySelector('.db').textContent = '0';
+  eqBands.forEach((b) => {
+    b.gain = 0;
   });
-  pushParams({ eq_db: new Array(EQ_FREQS.length).fill(0) });
+  syncEqValues();
+  eqCommit();
 });
+
+document.getElementById('btnEqReset').addEventListener('click', () => {
+  eqBands = EQ_DEFAULT_FREQS.map((f) => ({ type: 'peak', freq: f, q: 1.41, gain: 0 }));
+  eqRowSig = '';
+  ensureEqRows();
+  eqCommit();
+});
+
+document.getElementById('eqOn').addEventListener('change', (e) => {
+  eqEditAt = Date.now();
+  pushParams({ eq_on: e.target.checked });
+});
+
+/** 每帧（120 ms）调用：把后端状态同步进来，但别覆盖用户正在改的东西。 */
+function renderEq() {
+  if (!state || !state.params) return;
+  const chk = document.getElementById('eqOn');
+  const on = state.params.eq_on !== false;
+  if (document.activeElement !== chk) chk.checked = on;
+
+  if (state.params.eq_max) EQ_MAX_BANDS = state.params.eq_max;
+
+  const remote = state.params.eq_bands || [];
+  // 本地刚改过就先不听远端的 —— 请求还在路上时回冲会让滑块"弹回去"
+  if (Date.now() - eqEditAt > 900) {
+    const a = remote.map(eqCanon).join('|');
+    const b = eqBands.map(eqCanon).join('|');
+    if (a !== b) {
+      eqBands = remote.map((x) => ({
+        type: x.type,
+        freq: x.freq,
+        q: x.q,
+        gain: x.gain,
+      }));
+      eqRowSig = '';
+    }
+  }
+  ensureEqRows();
+  drawEqChart();
+  // 总开关关掉时压暗曲线：参数还在，但耳朵听不到，不压暗会让人以为调了没反应
+  const chart = document.getElementById('eqChart');
+  if (chart) chart.classList.toggle('off', !on);
+}
 
 // ---------------------------------------------------------------- VB-CABLE 前置
 
@@ -763,6 +1222,40 @@ for (const id of ['btnVbGuide', 'btnGuide']) {
   });
 }
 
-buildEq();
+// ---------------------------------------------------------------- 标签页切换
+
+const LS_TAB = 'gamingvoice.tab';
+
+function switchTab(name) {
+  const id = name === 'eq' ? 'pageEq' : 'pageMix';
+  document.querySelectorAll('.tab').forEach((b) => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('.tabPage').forEach((p) => {
+    p.classList.toggle('hidden', p.id !== id);
+  });
+  try {
+    localStorage.setItem(LS_TAB, name);
+  } catch (_) {}
+  // 切回来时按当前主题重算一遍：隐藏期间 SVG 的 getBoundingClientRect 全是 0，
+  // 有些尺寸相关的量要重新取。
+  if (name === 'eq') drawEqChart(true);
+  else drawRadar();
+}
+
+document.querySelectorAll('.tab').forEach((b) => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
+
+(function initTab() {
+  let t = 'mix';
+  try {
+    t = localStorage.getItem(LS_TAB) || 'mix';
+  } catch (_) {}
+  switchTab(t === 'eq' ? 'eq' : 'mix');
+})();
+
 drawRadar();
 poll();

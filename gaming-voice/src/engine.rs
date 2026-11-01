@@ -39,8 +39,9 @@ pub struct Params {
   pub gains_db: [f32; CHANNELS],
   pub delays_ms: [f32; CHANNELS],
   pub makeup_db: f32,
-  /// 双耳输出上的 10 段 EQ（dB）。全 0 时是真正的直通。
-  pub eq_db: [f32; eq::BANDS.len()],
+  /// 双耳输出上的参数 EQ：可增删的频点列表（顺序即串联顺序）。
+  /// 空列表、或全是不带增益的平直滤波器时是真正的直通。
+  pub eq_bands: Vec<eq::Band>,
   pub eq_on: bool,
 }
 
@@ -51,7 +52,7 @@ impl Default for Params {
       gains_db: [0.0, 0.0, -3.0, 0.0, 4.0, 4.0, 0.0, 0.0],
       delays_ms: [0.0; CHANNELS],
       makeup_db: -6.0,
-      eq_db: [0.0; eq::BANDS.len()],
+      eq_bands: eq::default_bands(),
       eq_on: true,
     }
   }
@@ -308,7 +309,7 @@ pub fn run_processor(
     }
     // 系数只在值真的变了才重算（拖动推子时会连着好几块都调到这里）
     eq.set_enabled(params.eq_on);
-    eq.set_gains(&params.eq_db);
+    eq.set_bands(&params.eq_bands);
 
     // 环里不够一块：睡 1 ms 再看（渲染端会补静音，不会卡）
     if src.slots() < BLOCK * CHANNELS {

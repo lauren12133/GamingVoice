@@ -343,8 +343,9 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "gains_db": p.gains_db,
       "delays_ms": p.delays_ms,
       "makeup_db": p.makeup_db,
-      "eq_db": p.eq_db,
+      "eq_bands": eq_bands_json(&p.eq_bands),
       "eq_on": p.eq_on,
+      "eq_max": dsp::surround::eq::MAX_BANDS,
       "block": engine::BLOCK,
     },
     "preset": presets::active_name(),
@@ -384,6 +385,21 @@ fn params_block_ms() -> f32 {
   engine::BLOCK as f32 * 1000.0 / audio::SAMPLE_RATE as f32
 }
 
+/// 频点列表 → JSON。前端拿它画表格和曲线，字段名要和 `set_params` 的解析对齐。
+fn eq_bands_json(bands: &[dsp::surround::eq::Band]) -> Vec<Value> {
+  bands
+    .iter()
+    .map(|b| {
+      json!({
+        "type": b.kind.as_str(),
+        "freq": b.freq,
+        "q": b.q,
+        "gain": b.gain_db,
+      })
+    })
+    .collect()
+}
+
 fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
   let Ok(v) = serde_json::from_slice::<Value>(body) else {
     return json!({"ok": false, "error": "body 不是合法 JSON"}).to_string();
@@ -408,13 +424,35 @@ fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
   if let Some(d) = v.get("makeup_db").and_then(|x| x.as_f64()) {
     p.makeup_db = (d as f32).clamp(-30.0, 12.0);
   }
-  if let Some(arr) = v.get("eq_db").and_then(|x| x.as_array()) {
-    let n = dsp::surround::eq::BANDS.len();
-    for (i, item) in arr.iter().take(n).enumerate() {
-      if let Some(d) = item.as_f64() {
-        p.eq_db[i] = (d as f32).clamp(-dsp::surround::eq::MAX_DB, dsp::surround::eq::MAX_DB);
-      }
+  if let Some(arr) = v.get("eq_bands").and_then(|x| x.as_array()) {
+    // 整条链替换而不是逐项覆盖：频点可以被删、被重排，逐项合并会留下幽灵段。
+    // 越界值一律走 `sanitized`，别让界面的笔误把滤波器推到不稳定区。
+    let mut bands: Vec<dsp::surround::eq::Band> = Vec::with_capacity(arr.len());
+    for item in arr.iter().take(dsp::surround::eq::MAX_BANDS) {
+      let kind = item
+        .get("type")
+        .and_then(|x| x.as_str())
+        .and_then(dsp::surround::eq::FilterKind::parse)
+        .unwrap_or(dsp::surround::eq::FilterKind::Peak);
+      let num = |k: &str, d: f32| {
+        item
+          .get(k)
+          .and_then(|x| x.as_f64())
+          .map(|x| x as f32)
+          .filter(|x| x.is_finite())
+          .unwrap_or(d)
+      };
+      bands.push(
+        dsp::surround::eq::Band {
+          kind,
+          freq: num("freq", 1000.0),
+          q: num("q", 1.41),
+          gain_db: num("gain", 0.0),
+        }
+        .sanitized(),
+      );
     }
+    p.eq_bands = bands;
   }
   if let Some(b) = v.get("eq_on").and_then(|x| x.as_bool()) {
     p.eq_on = b;

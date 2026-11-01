@@ -28,6 +28,11 @@
     </div>
   </header>
 
+  <nav class="tabs" role="tablist">
+    <button class="tab on" data-tab="mix" role="tab" aria-selected="true">声音增益</button>
+    <button class="tab" data-tab="eq" role="tab" aria-selected="false">EQ 调整</button>
+  </nav>
+
   <div id="warn" class="warn hidden">
     <span id="warnText"></span>
     <button id="btnGuide" class="warnBtn" title="打开 Windows 声音设置">设置引导</button>
@@ -48,99 +53,134 @@
     </div>
   </div>
 
-  <section class="panel devices">
-    <label class="field">
-      <span>源 · 采集哪条端点（要 8 声道）</span>
-      <select id="selSource"></select>
-      <em id="srcMeta" class="meta">—</em>
-    </label>
-    <label class="field">
-      <span>输出 · 耳机</span>
-      <select id="selSink"></select>
-      <em id="snkMeta" class="meta">—</em>
-    </label>
-    <label class="field wide">
-      <span>方位数据 · HRIR（决定前后能不能分）</span>
-      <select id="selHrir"></select>
-      <em id="hrirMeta" class="meta">—</em>
-    </label>
-    <div class="devActions">
-      <button id="btnRefresh" class="ghost" title="重新枚举音频端点（插拔设备后用）">刷新设备</button>
-      <div class="meterBox">
-        <div class="kv"><i>处理块</i><b id="kBlock">—</b></div>
-        <div class="kv"><i>缓冲</i><b id="kBuf">—</b></div>
-        <div class="kv"><i>欠载</i><b id="kXrun">—</b></div>
-        <div class="kv"><i>已运行</i><b id="kUp">—</b></div>
-      </div>
-    </div>
-  </section>
+  <!-- ================= 声音增益 ================= -->
+  <div class="tabPage" id="pageMix">
 
-  <main>
-    <section class="panel channels">
-      <div class="panelHead">
-        <h2>方向增益</h2>
-        <div class="presets">
-          <select id="selPreset" title="选择方向预设"></select>
-          <button id="btnPresetSave" title="把当前 8 个方向的增益存成一个新预设">存为…</button>
-          <button id="btnPresetDel" class="ghost" title="删除当前自定义预设">删除</button>
-          <input id="presetName" placeholder="预设名（≤16 字）" maxlength="16" hidden>
-          <button id="btnPresetOk" class="primary" hidden>确定</button>
+    <section class="panel devices">
+      <label class="field">
+        <span>源 · 采集哪条端点（要 8 声道）</span>
+        <select id="selSource"></select>
+        <em id="srcMeta" class="meta">—</em>
+      </label>
+      <label class="field">
+        <span>输出 · 耳机</span>
+        <select id="selSink"></select>
+        <em id="snkMeta" class="meta">—</em>
+      </label>
+      <label class="field wide">
+        <span>方位数据 · HRIR（决定前后能不能分）</span>
+        <select id="selHrir"></select>
+        <em id="hrirMeta" class="meta">—</em>
+      </label>
+      <div class="devActions">
+        <button id="btnRefresh" class="ghost" title="重新枚举音频端点（插拔设备后用）">刷新设备</button>
+        <div class="meterBox">
+          <div class="kv"><i>处理块</i><b id="kBlock">—</b></div>
+          <div class="kv"><i>缓冲</i><b id="kBuf">—</b></div>
+          <div class="kv"><i>欠载</i><b id="kXrun">—</b></div>
+          <div class="kv"><i>已运行</i><b id="kUp">—</b></div>
         </div>
       </div>
-      <div id="chList"></div>
-      <p class="note">
-        增益加在 <b>卷积之前</b>，所以调一个方向不会动到其它方向 —— 这是它能成立的全部原因。
-      </p>
     </section>
 
-    <aside class="panel radarPanel">
-      <div class="panelHead">
-        <h2>声场</h2>
-        <span id="clipTag" class="tag hidden">削波风险</span>
-      </div>
-      <svg id="radar" viewBox="0 0 300 300" role="img" aria-label="声场方位图"></svg>
-      <p class="hint">半径 = 该方向增益，拖动左侧滑块会实时变化；圆点亮度 = 该方向的实时电平。</p>
-      <div class="globals">
-        <label class="mini">
-          <span>总补偿</span>
-          <input id="makeup" type="range" min="-30" max="12" step="0.5">
-          <b id="makeupVal">—</b>
-        </label>
-        <!--
-          块长入口已按需求锁定为 480（10 ms），先注释掉、不删除，
-          等以后有更稳的低延迟方案（独占模式 / IAudioClient3 小周期）再放开。
-        <label class="mini">
-          <span>块长</span>
-          <select id="block">
-            <option value="64">64（1.3 ms）</option>
-            <option value="128">128（2.7 ms）</option>
-            <option value="256">256（5.3 ms）</option>
-            <option value="480">480（10 ms，当前固定）</option>
-          </select>
-        </label>
-        -->
-        <div class="mini ro">
-          <span>块长</span>
-          <b>480 样本 · 10.0 ms（已固定）</b>
+    <main>
+      <section class="panel channels">
+        <div class="panelHead">
+          <h2>方向增益</h2>
+          <div class="presets">
+            <select id="selPreset" title="选择方向预设"></select>
+            <button id="btnPresetSave" title="把当前 8 个方向的增益存成一个新预设">存为…</button>
+            <button id="btnPresetDel" class="ghost" title="删除当前自定义预设">删除</button>
+            <input id="presetName" placeholder="预设名（≤16 字）" maxlength="16" hidden>
+            <button id="btnPresetOk" class="primary" hidden>确定</button>
+          </div>
+        </div>
+        <div id="chList"></div>
+        <p class="note">
+          增益加在 <b>卷积之前</b>，所以调一个方向不会动到其它方向 —— 这是它能成立的全部原因。
+        </p>
+      </section>
+
+      <aside class="panel radarPanel">
+        <div class="panelHead">
+          <h2>声场</h2>
+          <span id="clipTag" class="tag hidden">削波风险</span>
+        </div>
+        <svg id="radar" viewBox="0 0 300 300" role="img" aria-label="声场方位图"></svg>
+        <p class="hint">半径 = 该方向增益，拖动左侧滑块会实时变化；圆点亮度 = 该方向的实时电平。</p>
+        <div class="globals">
+          <label class="mini">
+            <span>总补偿</span>
+            <input id="makeup" type="range" min="-30" max="12" step="0.5">
+            <b id="makeupVal">—</b>
+          </label>
+          <!--
+            块长入口已按需求锁定为 480（10 ms），先注释掉、不删除，
+            等以后有更稳的低延迟方案（独占模式 / IAudioClient3 小周期）再放开。
+          <label class="mini">
+            <span>块长</span>
+            <select id="block">
+              <option value="64">64（1.3 ms）</option>
+              <option value="128">128（2.7 ms）</option>
+              <option value="256">256（5.3 ms）</option>
+              <option value="480">480（10 ms，当前固定）</option>
+            </select>
+          </label>
+          -->
+          <div class="mini ro">
+            <span>块长</span>
+            <b>480 样本 · 10.0 ms（已固定）</b>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- ================= EQ 调整 ================= -->
+  <div class="tabPage hidden" id="pageEq">
+    <section class="panel eqPanel">
+      <div class="panelHead eqHeadBar">
+        <h2>耳机 EQ <em>参数均衡器 · 作用于双耳输出</em></h2>
+        <div class="eqTools">
+          <label class="chk"><input type="checkbox" id="eqOn" checked><span>启用</span></label>
+          <button id="btnEqAdd" class="primary" title="加一个峰值频点">+ 添加频点</button>
+          <button id="btnEqFlat" class="ghost" title="所有增益归零（滤波器类型和其它参数保留）">全部归零</button>
+          <button id="btnEqReset" class="ghost" title="恢复成 10 段全平">重置</button>
         </div>
       </div>
-    </aside>
-  </main>
 
-  <section class="panel eqPanel">
-    <div class="panelHead">
-      <h2>耳机 EQ <em>10 段 · 作用在双耳输出</em></h2>
-      <div class="eqTools">
-        <label class="chk"><input type="checkbox" id="eqOn" checked><span>启用</span></label>
-        <button id="btnEqFlat" class="ghost">全部归零</button>
+      <div class="eqChartWrap">
+        <svg id="eqChart" viewBox="0 0 1100 300" role="img" aria-label="EQ 频响曲线"></svg>
+        <div class="eqChartBar">
+          <span class="eqLegend">
+            <i class="sw peak"></i>峰值
+            <i class="sw shelf"></i>架式
+            <i class="sw cut"></i>高通/低通
+          </span>
+          <span class="eqHint">曲线上的圆点可直接拖动（横轴改频点、纵轴改增益）· 空白处双击加频点</span>
+          <span id="eqSum" class="eqSum">—</span>
+        </div>
       </div>
-    </div>
-    <div id="eqBands"></div>
-    <p class="note">
-      EQ 在 HRIR 之后 —— 它补偿的是<b>耳机本身</b>的频响。抬得越狠，卷积塑造的方位线索被冲淡得越多，
-      所以范围限在 ±12 dB，全 0 时是真正的直通。
-    </p>
-  </section>
+
+      <div class="eqTable">
+        <div class="eqRow eqRowHead">
+          <span class="c-idx">#</span>
+          <span class="c-kind">滤波器</span>
+          <span class="c-freq">频点 Hz</span>
+          <span class="c-q">Q 值</span>
+          <span class="c-gain">增益 dB</span>
+          <span class="c-del"></span>
+        </div>
+        <div id="eqRows"></div>
+        <p id="eqEmpty" class="eqEmpty hidden">还没有频点。点「+ 添加频点」，或者在曲线上双击。</p>
+      </div>
+
+      <p class="note">
+        EQ 在 HRIR <b>之后</b> —— 它补偿的是<b>耳机本身</b>的频响。抬得越狠，卷积塑造的方位线索被冲淡得越多，
+        所以增益限在 ±12 dB；全部为 0 时是<b>真正的直通</b>（一个样本都不乘），不是"接近直通"。
+      </p>
+    </section>
+  </div>
 </div>
 <script src="/app.js"></script>
 </body>
