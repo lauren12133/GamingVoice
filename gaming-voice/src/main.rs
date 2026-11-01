@@ -9,6 +9,10 @@
 //!
 //! 这个工具走的是**旁路**：自己开 loopback 和自己的渲染流，完全不碰引擎的单声道通路。
 
+// 双击启动时不要弹黑框：release 版直接以 GUI 程序身份运行。
+// debug 版保留控制台 —— 调试时那些枚举端点/HRIR 的日志就是靠它看的。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +34,16 @@ mod audio {
 mod dsp;
 
 mod engine;
+
+mod presets;
+
+mod autostart;
+
+mod vbcable;
+
+/// 内嵌的 GV 图标（窗口 + 托盘共用）。
+#[cfg(windows)]
+mod icon;
 
 /// 原生窗口 + 任务栏托盘（Windows）。非 Windows 用空实现，只为让 `cargo test` 跑通。
 #[cfg(windows)]
@@ -228,6 +242,23 @@ fn handle(mut s: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
     ("POST", "/api/start") => ("application/json", start(&shared, &body).into_bytes()),
     ("POST", "/api/stop") => ("application/json", stop().into_bytes()),
     ("POST", "/api/refresh") => ("application/json", refresh().into_bytes()),
+    ("POST", "/api/vbcable/install") => (
+      "application/json",
+      vbcable_install().to_string().into_bytes(),
+    ),
+    ("POST", "/api/setup-guide") => ("application/json", setup_guide().to_string().into_bytes()),
+    ("POST", "/api/autostart") => (
+      "application/json",
+      set_autostart(&body).to_string().into_bytes(),
+    ),
+    ("GET", "/api/presets") => (
+      "application/json",
+      presets_json(&shared).to_string().into_bytes(),
+    ),
+    ("POST", "/api/presets") => (
+      "application/json",
+      presets_post(&shared, &body).into_bytes(),
+    ),
     _ => ("text/plain; charset=utf-8", b"404".to_vec()),
   };
 
@@ -291,6 +322,7 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
     })
     .unwrap_or_default();
   let st = shared.status.lock().map(|s| s.clone()).unwrap_or_default();
+  let vb = vb_cable_state();
   let endpoints: Vec<Value> = endpoints_cached()
     .iter()
     .map(|e| {
@@ -311,7 +343,17 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "gains_db": p.gains_db,
       "delays_ms": p.delays_ms,
       "makeup_db": p.makeup_db,
+      "eq_db": p.eq_db,
+      "eq_on": p.eq_on,
       "block": engine::BLOCK,
+    },
+    "preset": presets::active_name(),
+    // 预设列表跟着 state 走：面板每帧都要用它画下拉，单独发一次请求反而更容易不同步
+    "presets": presets::list().iter().map(|p| p.to_json()).collect::<Vec<_>>(),
+    "autostart": autostart::enabled(),
+    "vbcable": {
+      "installed": vb.0,
+      "surround": vb.1,
     },
     "hrir": {
       "files": hrir_names(),
@@ -365,6 +407,17 @@ fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
   }
   if let Some(d) = v.get("makeup_db").and_then(|x| x.as_f64()) {
     p.makeup_db = (d as f32).clamp(-30.0, 12.0);
+  }
+  if let Some(arr) = v.get("eq_db").and_then(|x| x.as_array()) {
+    let n = dsp::surround::eq::BANDS.len();
+    for (i, item) in arr.iter().take(n).enumerate() {
+      if let Some(d) = item.as_f64() {
+        p.eq_db[i] = (d as f32).clamp(-dsp::surround::eq::MAX_DB, dsp::surround::eq::MAX_DB);
+      }
+    }
+  }
+  if let Some(b) = v.get("eq_on").and_then(|x| x.as_bool()) {
+    p.eq_on = b;
   }
   // 块长入口已按需求锁死为 480（10 ms），这里显式忽略旧客户端的 block 字段，
   // 而不是静默接受 —— 免得界面以为改成功了。
@@ -510,6 +563,93 @@ pub fn start(shared: &Arc<Shared>, body: &[u8]) -> String {
     "warning": hrir_warn,
   })
   .to_string()
+}
+
+/// 开/关开机启动。
+pub fn set_autostart(body: &[u8]) -> Value {
+  let v: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
+  let on = v.get("on").and_then(|x| x.as_bool()).unwrap_or(false);
+  match autostart::set(on) {
+    Ok(()) => json!({ "ok": true, "on": on }),
+    Err(e) => json!({ "ok": false, "error": e }),
+  }
+}
+
+/// 预设列表（含当前生效名与当前推子值）。
+pub fn presets_json(shared: &Arc<Shared>) -> Value {
+  let list: Vec<Value> = presets::list().iter().map(|p| p.to_json()).collect();
+  json!({
+    "presets": list,
+    "active": presets::active_name(),
+    "gains_db": presets::current_gains(shared),
+  })
+}
+
+/// 预设的写操作：`apply` / `save` / `delete`。
+pub fn presets_post(shared: &Arc<Shared>, body: &[u8]) -> String {
+  let v: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
+  let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+  let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+
+  let out = match action {
+    "apply" => presets::apply(name, shared).map(|()| json!({ "ok": true })),
+    "save" => {
+      // 允许直接传 gains_db（界面保存当前推子值），不传就用实时的
+      let mut gains = presets::current_gains(shared);
+      if let Some(arr) = v.get("gains_db").and_then(|x| x.as_array()) {
+        for (i, s) in arr.iter().take(8).enumerate() {
+          gains[i] = (s.as_f64().unwrap_or(0.0) as f32).clamp(-60.0, MAX_GAIN_DB);
+        }
+      }
+      presets::save(name, gains).map(|()| json!({ "ok": true }))
+    }
+    "delete" => presets::delete(name).map(|()| json!({ "ok": true })),
+    _ => Err("action 只能是 apply / save / delete".to_string()),
+  };
+
+  match out {
+    Ok(mut j) => {
+      j["presets"] = json!(presets::list()
+        .iter()
+        .map(|p| p.to_json())
+        .collect::<Vec<_>>());
+      j.to_string()
+    }
+    Err(e) => json!({ "ok": false, "error": e }).to_string(),
+  }
+}
+
+/// VB-CABLE 的两个状态位：`(装了没, 配成 8 声道没)`。
+///
+/// 这两件事必须分开报：装了但没配成 7.1 是最常见的失败姿势 —— 用户以为装完就完事，
+/// 结果端点默认是立体声，游戏照样只输出 2 声道。
+pub fn vb_cable_state() -> (bool, bool) {
+  let eps = endpoints_cached();
+  let mut installed = false;
+  let mut surround = false;
+  for e in eps.iter().filter(|e| vbcable::looks_like_cable(&e.name)) {
+    installed = true;
+    if e.channels >= 8 {
+      surround = true;
+    }
+  }
+  (installed, surround)
+}
+
+/// 一键装 VB-CABLE（内嵌安装包 → 临时目录 → 提权运行）。
+pub fn vbcable_install() -> Value {
+  match vbcable::install() {
+    Ok(msg) => json!({ "ok": true, "message": msg }),
+    Err(e) => json!({ "ok": false, "error": e }),
+  }
+}
+
+/// 打开系统声音设置（横幅右侧那个「设置引导」）。
+pub fn setup_guide() -> Value {
+  match vbcable::open_sound_settings() {
+    Ok(()) => json!({ "ok": true }),
+    Err(e) => json!({ "ok": false, "error": e }),
+  }
 }
 
 pub fn refresh() -> String {

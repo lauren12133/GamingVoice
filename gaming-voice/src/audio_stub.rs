@@ -28,6 +28,30 @@ impl Endpoint {
 pub fn enum_endpoints() -> Result<Vec<Endpoint>, String> {
   // `PV_SPATIAL_MOCK=1` 时返回假端点，用于在非 Windows 上验证界面
   // （真实设备列表一定来自 WASAPI，这里只是把 UI 跑起来的脚手架）。
+  // `2` = 模拟"没装 VB-CABLE"（只有板载声卡），用来验证安装提示卡；
+  // `3` = 装了但只有 2 声道，用来验证"已装但没配 7.1"那条分支。
+  if std::env::var("PV_SPATIAL_MOCK").as_deref() == Ok("2") {
+    return Ok(vec![Endpoint {
+      id: "mock-2ch".into(),
+      label: "耳机 (Realtek(R) Audio) · 2 声道 · 48 kHz".into(),
+      name: "耳机 (Realtek(R) Audio)".into(),
+      channels: 2,
+      rate: 48_000,
+      bytes: 32,
+      default: true,
+    }]);
+  }
+  if std::env::var("PV_SPATIAL_MOCK").as_deref() == Ok("3") {
+    return Ok(vec![Endpoint {
+      id: "mock-cable2".into(),
+      label: "CABLE Input (VB-Audio Virtual Cable) · 2 声道 · 48 kHz".into(),
+      name: "CABLE Input (VB-Audio Virtual Cable)".into(),
+      channels: 2,
+      rate: 48_000,
+      bytes: 32,
+      default: true,
+    }]);
+  }
   if std::env::var("PV_SPATIAL_MOCK").as_deref() == Ok("1") {
     return Ok(vec![
       Endpoint {

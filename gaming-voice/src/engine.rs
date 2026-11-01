@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::dsp::surround::eq::{self, Eq};
 use crate::dsp::surround::hrir::EARS;
 use crate::dsp::surround::layout::{Speaker, CHANNELS};
 use crate::dsp::surround::{Hrir, Spatial, SpatialParams};
@@ -38,6 +39,9 @@ pub struct Params {
   pub gains_db: [f32; CHANNELS],
   pub delays_ms: [f32; CHANNELS],
   pub makeup_db: f32,
+  /// 双耳输出上的 10 段 EQ（dB）。全 0 时是真正的直通。
+  pub eq_db: [f32; eq::BANDS.len()],
+  pub eq_on: bool,
 }
 
 impl Default for Params {
@@ -47,6 +51,8 @@ impl Default for Params {
       gains_db: [0.0, 0.0, -3.0, 0.0, 4.0, 4.0, 0.0, 0.0],
       delays_ms: [0.0; CHANNELS],
       makeup_db: -6.0,
+      eq_db: [0.0; eq::BANDS.len()],
+      eq_on: true,
     }
   }
 }
@@ -284,6 +290,7 @@ pub fn run_processor(
     st.hrir_measured = measured;
   }
   let mut sp = Spatial::with_block(hrir, params.to_spatial(), BLOCK);
+  let mut eq = Eq::new(SAMPLE_RATE as f32);
 
   // 取数块与处理块必须是同一个值（[`BLOCK`]）。旧实现里一个用 HOP、一个用可调 block，
   // 结果每次只消费 480 中的 128 帧，剩下的被丢掉 → 周期性断续，听感就是"电流声"。
@@ -299,6 +306,9 @@ pub fn run_processor(
       params = p.clone();
       sp.set_params(params.to_spatial());
     }
+    // 系数只在值真的变了才重算（拖动推子时会连着好几块都调到这里）
+    eq.set_enabled(params.eq_on);
+    eq.set_gains(&params.eq_db);
 
     // 环里不够一块：睡 1 ms 再看（渲染端会补静音，不会卡）
     if src.slots() < BLOCK * CHANNELS {
@@ -324,6 +334,8 @@ pub fn run_processor(
     }
 
     sp.process_planar(&bus, &mut l, &mut r);
+    // EQ 放在卷积之后：它补偿的是耳机本身的频响，而耳机在 HRIR 之后才介入
+    eq.process(&mut l, &mut r);
 
     // 写双耳（交错 L/R）
     let mut ear_peak = [0.0f32; EARS];
