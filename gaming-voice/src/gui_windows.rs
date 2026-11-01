@@ -49,11 +49,15 @@ const M_PANEL: usize = 2004;
 const M_EXIT: usize = 2005;
 /// 托盘里的 HRIR 子菜单：`M_HRIR_BASE + 序号`
 const M_HRIR_BASE: usize = 3000;
-/// 托盘里的预设子菜单：`M_PRESET_BASE + 序号`
+/// 托盘里的方向预设子菜单：`M_PRESET_BASE + 序号`
 const M_PRESET_BASE: usize = 4000;
 const M_AUTOSTART: usize = 5000;
 const M_VBCABLE: usize = 5001;
 const M_GUIDE: usize = 5002;
+/// 托盘里「导入 / 管理 EQ」—— 打开面板并直接切到 EQ 页
+const M_EQ_PANEL: usize = 5003;
+/// 托盘里的 EQ 预设子菜单：`M_EQ_BASE + 序号`
+const M_EQ_BASE: usize = 6000;
 
 /// 子菜单最多列这么多条（HeSuVi 的 hrir 目录能塞上百个，全列会撑爆屏幕）
 const SUBMENU_MAX: usize = 40;
@@ -608,6 +612,28 @@ unsafe fn show_menu(hwnd: HWND) {
       let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("方向预设"));
     }
 
+    // ── EQ 预设：同样实时生效（EQ 在卷积之后，换链不需要重启）──
+    if let Ok(sub) = CreatePopupMenu() {
+      let active = crate::eq_presets::active_name();
+      for (i, p) in crate::eq_presets::list()
+        .iter()
+        .take(SUBMENU_MAX)
+        .enumerate()
+      {
+        let flags = MF_STRING
+          | if !active.is_empty() && p.name == active {
+            MF_CHECKED
+          } else {
+            MF_ENABLED
+          };
+        let h = HSTRING::from(p.name.clone());
+        let _ = AppendMenuW(sub, flags, M_EQ_BASE + i, &h);
+      }
+      let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+      let _ = AppendMenuW(sub, MF_STRING, M_EQ_PANEL, w!("导入 / 管理…"));
+      let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("EQ 预设"));
+    }
+
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
     // ── 前置条件：没装 VB-CABLE 时把安装入口放在最显眼的位置 ──
@@ -754,6 +780,26 @@ fn do_apply_preset(hwnd: HWND, name: &str) {
   unsafe { update_status(hwnd) };
 }
 
+/// 套用 EQ 预设（写 params，实时生效，不用重启处理线程）。
+fn do_apply_eq_preset(hwnd: HWND, name: &str) {
+  let shared = CTX
+    .lock()
+    .ok()
+    .and_then(|g| g.as_ref().map(|c| c.shared.clone()));
+  if let Some(sh) = shared {
+    if let Err(e) = crate::eq_presets::apply(name, &sh) {
+      unsafe {
+        MessageBoxW(
+          Some(hwnd),
+          &HSTRING::from(e),
+          w!("套用 EQ 预设失败"),
+          MB_OK | MB_ICONWARNING,
+        );
+      }
+    }
+  }
+}
+
 fn do_toggle_autostart(hwnd: HWND) {
   let on = !crate::autostart::enabled();
   if let Err(e) = crate::autostart::set(on) {
@@ -793,6 +839,11 @@ fn do_install_vbcable(hwnd: HWND) {
 
 fn open_panel() {
   open_browser(&format!("http://127.0.0.1:{PORT}/"));
+}
+
+/// 打开面板并直接落到 EQ 页（带 hash，前端 `initTab` 会认）。
+fn open_eq_panel() {
+  open_browser(&format!("http://127.0.0.1:{PORT}/#eq"));
 }
 
 // ---------------------------------------------------------------- 窗口过程
@@ -856,6 +907,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
           if let Some(p) = list.get(id - M_PRESET_BASE) {
             let name = p.name.clone();
             do_apply_preset(hwnd, &name);
+          }
+        }
+        M_EQ_PANEL => open_eq_panel(),
+        id if (M_EQ_BASE..M_EQ_BASE + SUBMENU_MAX).contains(&id) => {
+          let list = crate::eq_presets::list();
+          if let Some(p) = list.get(id - M_EQ_BASE) {
+            let name = p.name.clone();
+            do_apply_eq_preset(hwnd, &name);
           }
         }
         M_EXIT => unsafe {

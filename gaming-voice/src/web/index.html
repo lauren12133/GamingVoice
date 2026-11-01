@@ -142,11 +142,35 @@
       <div class="panelHead eqHeadBar">
         <h2>耳机 EQ <em>参数均衡器 · 作用于双耳输出</em></h2>
         <div class="eqTools">
+          <select id="selEqPreset" title="EQ 预设（导入的曲线会自动存成一条）"></select>
+          <button id="btnEqSave" class="ghost" title="把当前曲线存成一个预设">存为…</button>
+          <button id="btnEqDel" class="ghost" title="删除当前自定义预设">删除</button>
+          <button id="btnEqImport" class="ghost imp"
+                  title="导入 EqualizerAPO 的 .txt，或本程序能识别的 JSON">导入…</button>
+          <input id="eqFile" type="file" accept=".txt,.json,.apo,text/plain,application/json" hidden>
+          <span class="vsep"></span>
           <label class="chk"><input type="checkbox" id="eqOn" checked><span>启用</span></label>
           <button id="btnEqAdd" class="primary" title="加一个峰值频点">+ 添加频点</button>
           <button id="btnEqFlat" class="ghost" title="所有增益归零（滤波器类型和其它参数保留）">全部归零</button>
           <button id="btnEqReset" class="ghost" title="恢复成 10 段全平">重置</button>
         </div>
+      </div>
+
+      <div id="eqNameRow" class="eqNameRow" hidden>
+        <input id="eqPresetName" placeholder="预设名（≤32 字）" maxlength="32">
+        <button id="btnEqPresetOk" class="primary">确定</button>
+        <button id="btnEqPresetCancel" class="ghost">取消</button>
+      </div>
+
+      <div class="eqSubBar">
+        <label class="mini preamp">
+          <span>前级</span>
+          <input id="eqPreamp" type="range" min="-30" max="12" step="0.1" value="0">
+          <b id="eqPreampVal">0.0 dB</b>
+        </label>
+        <p class="eqTip">
+          前级不改变曲线形状，只给提升留余量 —— 导入配置里的 <code>Preamp</code> 就落在这。
+        </p>
       </div>
 
       <div class="eqChartWrap">
@@ -161,6 +185,8 @@
           <span id="eqSum" class="eqSum">—</span>
         </div>
       </div>
+
+      <div id="eqNotice" class="eqNotice hidden"></div>
 
       <div class="eqTable">
         <div class="eqRow eqRowHead">

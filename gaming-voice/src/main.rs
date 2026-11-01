@@ -37,6 +37,10 @@ mod engine;
 
 mod presets;
 
+mod eq_presets;
+
+mod eq_import;
+
 mod autostart;
 
 mod vbcable;
@@ -259,6 +263,11 @@ fn handle(mut s: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
       "application/json",
       presets_post(&shared, &body).into_bytes(),
     ),
+    ("POST", "/api/eq/presets") => (
+      "application/json",
+      eq_presets_post(&shared, &body).into_bytes(),
+    ),
+    ("POST", "/api/eq/import") => ("application/json", eq_import_post(&body).into_bytes()),
     _ => ("text/plain; charset=utf-8", b"404".to_vec()),
   };
 
@@ -345,12 +354,18 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "makeup_db": p.makeup_db,
       "eq_bands": eq_bands_json(&p.eq_bands),
       "eq_on": p.eq_on,
+      "eq_preamp": p.eq_preamp,
+      "eq_preamp_min": dsp::surround::eq::MIN_PREAMP_DB,
+      "eq_preamp_max": dsp::surround::eq::MAX_PREAMP_DB,
       "eq_max": dsp::surround::eq::MAX_BANDS,
       "block": engine::BLOCK,
     },
     "preset": presets::active_name(),
     // 预设列表跟着 state 走：面板每帧都要用它画下拉，单独发一次请求反而更容易不同步
     "presets": presets::list().iter().map(|p| p.to_json()).collect::<Vec<_>>(),
+    // EQ 预设同理跟着 state 走：面板和托盘都要用它画下拉/菜单
+    "eq_preset": eq_presets::active_name(),
+    "eq_presets": eq_presets::list().iter().map(|p| p.to_json()).collect::<Vec<_>>(),
     "autostart": autostart::enabled(),
     "vbcable": {
       "installed": vb.0,
@@ -400,6 +415,39 @@ fn eq_bands_json(bands: &[dsp::surround::eq::Band]) -> Vec<Value> {
     .collect()
 }
 
+/// JSON 数组 → 频点链。
+///
+/// 「整条替换」而不是逐项合并：频点可以被删、被重排，合并会留下幽灵段。
+/// 越界值一律走 `sanitized`，别让界面的笔误把滤波器推到不稳定区。
+fn bands_from_json(arr: &[Value]) -> Vec<dsp::surround::eq::Band> {
+  let mut bands = Vec::with_capacity(arr.len().min(dsp::surround::eq::MAX_BANDS));
+  for item in arr.iter().take(dsp::surround::eq::MAX_BANDS) {
+    let kind = item
+      .get("type")
+      .and_then(|x| x.as_str())
+      .and_then(dsp::surround::eq::FilterKind::parse)
+      .unwrap_or(dsp::surround::eq::FilterKind::Peak);
+    let num = |k: &str, d: f32| {
+      item
+        .get(k)
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| x.is_finite())
+        .unwrap_or(d)
+    };
+    bands.push(
+      dsp::surround::eq::Band {
+        kind,
+        freq: num("freq", 1000.0),
+        q: num("q", 1.41),
+        gain_db: num("gain", 0.0),
+      }
+      .sanitized(),
+    );
+  }
+  bands
+}
+
 fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
   let Ok(v) = serde_json::from_slice::<Value>(body) else {
     return json!({"ok": false, "error": "body 不是合法 JSON"}).to_string();
@@ -425,37 +473,26 @@ fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
     p.makeup_db = (d as f32).clamp(-30.0, 12.0);
   }
   if let Some(arr) = v.get("eq_bands").and_then(|x| x.as_array()) {
-    // 整条链替换而不是逐项覆盖：频点可以被删、被重排，逐项合并会留下幽灵段。
-    // 越界值一律走 `sanitized`，别让界面的笔误把滤波器推到不稳定区。
-    let mut bands: Vec<dsp::surround::eq::Band> = Vec::with_capacity(arr.len());
-    for item in arr.iter().take(dsp::surround::eq::MAX_BANDS) {
-      let kind = item
-        .get("type")
-        .and_then(|x| x.as_str())
-        .and_then(dsp::surround::eq::FilterKind::parse)
-        .unwrap_or(dsp::surround::eq::FilterKind::Peak);
-      let num = |k: &str, d: f32| {
-        item
-          .get(k)
-          .and_then(|x| x.as_f64())
-          .map(|x| x as f32)
-          .filter(|x| x.is_finite())
-          .unwrap_or(d)
-      };
-      bands.push(
-        dsp::surround::eq::Band {
-          kind,
-          freq: num("freq", 1000.0),
-          q: num("q", 1.41),
-          gain_db: num("gain", 0.0),
-        }
-        .sanitized(),
+    // 整条链替换而不是逐项覆盖：频点可以被删、被重排，逐项合并会留下幽灵段
+    p.eq_bands = bands_from_json(arr);
+  }
+  if let Some(d) = v.get("eq_preamp").and_then(|x| x.as_f64()) {
+    let d = d as f32;
+    if d.is_finite() {
+      p.eq_preamp = d.clamp(
+        dsp::surround::eq::MIN_PREAMP_DB,
+        dsp::surround::eq::MAX_PREAMP_DB,
       );
     }
-    p.eq_bands = bands;
   }
   if let Some(b) = v.get("eq_on").and_then(|x| x.as_bool()) {
     p.eq_on = b;
+  }
+  // 改完之后再看一眼：曲线还是不是那个预设？
+  // 是 → 名字保留（界面上"改回原值"不该莫名其妙变成「未保存」）；
+  // 不是 → 名字作废，否则下拉框会拿一个不再成立的标签骗人。
+  if !eq_presets::still_matches(&p.eq_bands, p.eq_preamp) {
+    eq_presets::clear_active();
   }
   // 块长入口已按需求锁死为 480（10 ms），这里显式忽略旧客户端的 block 字段，
   // 而不是静默接受 —— 免得界面以为改成功了。
@@ -653,6 +690,72 @@ pub fn presets_post(shared: &Arc<Shared>, body: &[u8]) -> String {
         .collect::<Vec<_>>());
       j.to_string()
     }
+    Err(e) => json!({ "ok": false, "error": e }).to_string(),
+  }
+}
+
+/// EQ 预设的写操作：`apply` / `save` / `delete`。
+///
+/// `save` 允许直接带 `bands` + `preamp`（界面刚导入完、还没等参数请求回来就存），
+/// 不带就从实时参数里取 —— 和方向预设同一套口味。
+pub fn eq_presets_post(shared: &Arc<Shared>, body: &[u8]) -> String {
+  let v: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
+  let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+  let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+
+  let out = match action {
+    "apply" => eq_presets::apply(name, shared).map(|()| json!({ "ok": true })),
+    "save" => {
+      let (live_preamp, live_bands) = eq_presets::current(shared);
+      let preamp = v
+        .get("preamp")
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| x.is_finite())
+        .unwrap_or(live_preamp);
+      let bands = match v.get("bands").and_then(|x| x.as_array()) {
+        Some(arr) => bands_from_json(arr),
+        None => live_bands,
+      };
+      eq_presets::save(name, preamp, &bands).map(|()| json!({ "ok": true }))
+    }
+    "delete" => eq_presets::delete(name).map(|()| json!({ "ok": true })),
+    _ => Err("action 只能是 apply / save / delete".to_string()),
+  };
+
+  match out {
+    Ok(mut j) => {
+      j["eq_presets"] = json!(eq_presets::list()
+        .iter()
+        .map(|p| p.to_json())
+        .collect::<Vec<_>>());
+      j["active"] = json!(eq_presets::active_name());
+      j.to_string()
+    }
+    Err(e) => json!({ "ok": false, "error": e }).to_string(),
+  }
+}
+
+/// 导入 EQ 文件：**只解析，不动任何状态**。
+///
+/// 落地由界面决定 —— 它还要顺手把这份曲线存成预设、把警告念给用户听。
+/// 放在这儿做（而不是前端拿正则拆），是因为这些格式的坑得能用 `cargo test` 钉住。
+pub fn eq_import_post(body: &[u8]) -> String {
+  let v: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
+  let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+  if text.len() > 512 * 1024 {
+    return json!({ "ok": false, "error": "文件太大（上限 512 KB），这不是一份 EQ 配置" })
+      .to_string();
+  }
+  match eq_import::parse(text) {
+    Ok(imp) => json!({
+      "ok": true,
+      "format": imp.format,
+      "bands": eq_bands_json(&imp.bands),
+      "preamp": imp.preamp_db,
+      "notes": imp.notes,
+    })
+    .to_string(),
     Err(e) => json!({ "ok": false, "error": e }).to_string(),
   }
 }

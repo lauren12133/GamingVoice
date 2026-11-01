@@ -230,6 +230,51 @@ main{display:grid;grid-template-columns:1fr 352px;gap:16px;align-items:start}
 .chk{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim);cursor:pointer}
 .chk input{accent-color:var(--acc);cursor:pointer}
 
+/* 标题独占一行，工具条整行排开 —— 挤在一起会把「重置」单独甩到下一行 */
+.eqHeadBar{flex-direction:column;align-items:stretch;gap:10px}
+.eqHeadBar h2{white-space:normal}
+
+/* EQ 预设条：下拉 + 存为/删除/导入 */
+.eqTools select{
+  /* 必须给显式宽度：<select> 的 max-content 会按最长的 option 算（远超 280），
+     flex 换行时按那个值判定，结果工具条被撑成两行、多出 44 px 空白 */
+  width:280px;max-width:100%;
+  padding:6px 30px 6px 10px;font-size:12.5px;border-radius:8px;
+  background:var(--card2);border:1px solid var(--line);color:var(--txt);font-family:inherit;
+}
+.eqTools button{padding:6px 11px;font-size:12.5px;border-radius:8px}
+.eqTools button.imp{color:var(--acc2)}
+.eqTools .vsep{width:1px;height:18px;background:var(--line);margin:0 2px}
+
+.eqNameRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 0 0}
+/* 类选择器会盖掉 UA 的 [hidden]{display:none}，这里显式补回来 */
+.eqNameRow[hidden]{display:none}
+.eqNameRow input{
+  padding:6px 10px;font-size:12.5px;border-radius:8px;width:230px;
+  background:var(--card2);border:1px solid var(--line);color:var(--txt);font-family:inherit;
+}
+.eqNameRow input:focus{outline:none;border-color:var(--acc)}
+
+/* 前级：一条细一点的滑条，和下面那张表区分开 */
+.eqSubBar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:12px 0 2px}
+.eqSubBar .mini{grid-template-columns:44px minmax(150px,260px) 76px}
+.eqTip{margin:0;font-size:11.5px;color:var(--dim2);line-height:1.5;flex:1 1 260px}
+.eqTip code{
+  font-family:var(--mono);font-size:11px;padding:1px 4px;border-radius:4px;
+  background:var(--btn);color:var(--dim);
+}
+
+/* 导入结果常驻显示：一次导入改了 8 个频点和一个前级，一闪而过的提示等于没有 */
+.eqNotice{
+  margin:2px 0 10px;padding:9px 12px;border-radius:9px;
+  font-size:12px;line-height:1.65;color:var(--dim);
+  background:var(--card2);border:1px solid var(--line);
+}
+.eqNotice[hidden]{display:none}
+.eqNotice b{color:var(--acc2);font-weight:600}
+.eqNotice.bad{border-color:#c04a4a55;color:#e0a0a0}
+
+
 .eqChartWrap{margin:4px 0 12px}
 #eqChart{display:block;width:100%;height:auto;touch-action:none;user-select:none}
 /* 总开关关掉时压暗：参数还在，但耳朵听不到，别让人以为调了没反应 */

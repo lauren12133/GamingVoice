@@ -43,6 +43,8 @@ pub struct Params {
   /// 空列表、或全是不带增益的平直滤波器时是真正的直通。
   pub eq_bands: Vec<eq::Band>,
   pub eq_on: bool,
+  /// EQ 链首的前级（dB）。导入 EqualizerAPO 配置时那里面的 `Preamp` 就落在这。
+  pub eq_preamp: f32,
 }
 
 impl Default for Params {
@@ -54,6 +56,7 @@ impl Default for Params {
       makeup_db: -6.0,
       eq_bands: eq::default_bands(),
       eq_on: true,
+      eq_preamp: 0.0,
     }
   }
 }
@@ -309,6 +312,7 @@ pub fn run_processor(
     }
     // 系数只在值真的变了才重算（拖动推子时会连着好几块都调到这里）
     eq.set_enabled(params.eq_on);
+    eq.set_preamp(params.eq_preamp);
     eq.set_bands(&params.eq_bands);
 
     // 环里不够一块：睡 1 ms 再看（渲染端会补静音，不会卡）

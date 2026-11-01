@@ -39,6 +39,15 @@ pub const MAX_Q: f32 = 18.0;
 /// 增益上下限（dB）。
 pub const MAX_DB: f32 = 12.0;
 
+/// 前级增益下限（dB）。
+///
+/// 前级不是为了"调音量"而存在的（那是总补偿的活），它的唯一职责是**给提升留出余量**：
+/// 一个 +7 dB 的峰叠在满幅信号上必爆，所以上游先压下去。EqualizerAPO 配置里的
+/// `Preamp: -6.3 dB` 就是同一个东西，导入时必须原样接住，否则导入完就削波。
+pub const MIN_PREAMP_DB: f32 = -30.0;
+/// 见 [`MIN_PREAMP_DB`]。
+pub const MAX_PREAMP_DB: f32 = 12.0;
+
 /// 滤波器类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilterKind {
@@ -289,6 +298,8 @@ pub struct Eq {
   chain: [Vec<Biquad>; 2],
   /// 总开关：关掉时直接跳过，一帧都不算
   on: bool,
+  /// 链首的线性增益（dB）。0 时乘 1.0，不影响直通判定。
+  preamp_db: f32,
 }
 
 impl Eq {
@@ -298,6 +309,7 @@ impl Eq {
       bands: Vec::new(),
       chain: [Vec::new(), Vec::new()],
       on: true,
+      preamp_db: 0.0,
     }
   }
 
@@ -307,6 +319,19 @@ impl Eq {
 
   pub fn enabled(&self) -> bool {
     self.on
+  }
+
+  /// 设置前级（dB）。越界值夹回 [`MIN_PREAMP_DB`]..=[`MAX_PREAMP_DB`]。
+  pub fn set_preamp(&mut self, db: f32) {
+    self.preamp_db = if db.is_finite() {
+      db.clamp(MIN_PREAMP_DB, MAX_PREAMP_DB)
+    } else {
+      0.0
+    };
+  }
+
+  pub fn preamp_db(&self) -> f32 {
+    self.preamp_db
   }
 
   pub fn bands(&self) -> &[Band] {
@@ -353,19 +378,28 @@ impl Eq {
 
   /// 就地处理一个块的双耳信号。
   pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
-    if !self.on || self.is_passthrough() {
+    if !self.on {
+      return;
+    }
+    // 前级是恒定标量：0 dB 时乘 1.0 在 IEEE754 下是精确的，不会破坏"直通一个样本都不改"
+    let g = if self.preamp_db.abs() < 1e-4 {
+      1.0
+    } else {
+      10f32.powf(self.preamp_db / 20.0)
+    };
+    if g == 1.0 && self.is_passthrough() {
       return;
     }
     let n = l.len().min(r.len());
     for x in l.iter_mut().take(n) {
-      let mut v = *x;
+      let mut v = if g == 1.0 { *x } else { *x * g };
       for bq in self.chain[0].iter_mut() {
         v = bq.run(v);
       }
       *x = v;
     }
     for x in r.iter_mut().take(n) {
-      let mut v = *x;
+      let mut v = if g == 1.0 { *x } else { *x * g };
       for bq in self.chain[1].iter_mut() {
         v = bq.run(v);
       }
@@ -553,6 +587,49 @@ mod tests {
     let mut r = l.clone();
     eq.process(&mut l, &mut r);
     assert!(l.iter().all(|v| (*v - 0.3).abs() < 1e-9));
+  }
+
+  #[test]
+  fn preamp_scales_the_whole_block() {
+    // 导入 EqualizerAPO 配置时，`Preamp: -6.3 dB` 必须真的生效 —— 否则那些 +7 dB 的
+    // 峰叠在满幅信号上会立刻削波，用户听到的是"导入完更难听"。
+    let mut eq = Eq::new(48_000.0);
+    eq.set_bands(&default_bands());
+    eq.set_preamp(-6.0);
+    let mut l = vec![0.5f32; 64];
+    let mut r = l.clone();
+    eq.process(&mut l, &mut r);
+    let want = 0.5 * 10f32.powf(-6.0 / 20.0);
+    assert!(
+      (l[0] - want).abs() < 1e-6,
+      "前级 -6 dB 应乘 0.5012，实际得到 {}",
+      l[0]
+    );
+    assert!(l[0] < 0.5, "负前级必须让电平变小");
+  }
+
+  #[test]
+  fn zero_preamp_keeps_bitwise_passthrough() {
+    let mut eq = Eq::new(48_000.0);
+    eq.set_bands(&default_bands());
+    eq.set_preamp(0.0);
+    let mut l: Vec<f32> = (0..480).map(|i| (i as f32 * 0.01).sin()).collect();
+    let before = l.clone();
+    let mut r = l.clone();
+    eq.process(&mut l, &mut r);
+    assert_eq!(l, before, "前级 0 dB 不能破坏直通");
+  }
+
+  #[test]
+  fn preamp_is_clamped() {
+    let mut eq = Eq::new(48_000.0);
+    eq.set_preamp(-999.0);
+    assert_eq!(eq.preamp_db(), MIN_PREAMP_DB);
+    eq.set_preamp(999.0);
+    assert_eq!(eq.preamp_db(), MAX_PREAMP_DB);
+    // NaN 会一路污染到输出（整块变静音），必须在入口挡掉
+    eq.set_preamp(f32::NAN);
+    assert_eq!(eq.preamp_db(), 0.0);
   }
 
   #[test]

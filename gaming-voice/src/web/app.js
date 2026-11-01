@@ -1001,17 +1001,14 @@ function syncEqValues() {
 }
 
 /** 提交一次改动：立即重画 + 合并下发。 */
+/** 频点 → 下发用的载荷。字段名和后端 `bands_from_json` 一一对应。 */
+const eqBandsPayload = () =>
+  eqBands.map((b) => ({ type: b.type, freq: b.freq, q: b.q, gain: b.gain }));
+
 function eqCommit(redraw = true) {
   eqEditAt = Date.now();
   if (redraw) drawEqChart();
-  pushParams({
-    eq_bands: eqBands.map((b) => ({
-      type: b.type,
-      freq: b.freq,
-      q: b.q,
-      gain: b.gain,
-    })),
-  });
+  pushParams({ eq_bands: eqBandsPayload() });
 }
 
 function addEqBand(freq) {
@@ -1123,6 +1120,217 @@ document.getElementById('btnEqReset').addEventListener('click', () => {
   eqCommit();
 });
 
+// ---------------------------------------------------------------- EQ 前级
+
+const eqPreampEl = document.getElementById('eqPreamp');
+const eqPreampValEl = document.getElementById('eqPreampVal');
+
+/** 写前级：`notify` 为真时同时下发（拖滑条）。 */
+function setEqPreamp(v, notify) {
+  const lo = parseFloat(eqPreampEl.min);
+  const hi = parseFloat(eqPreampEl.max);
+  const x = Math.min(hi, Math.max(lo, Number(v) || 0));
+  eqPreampEl.value = x;
+  eqPreampValEl.textContent = fmt(x) + ' dB';
+  if (notify) {
+    eqEditAt = Date.now();
+    pushParams({ eq_preamp: x });
+  }
+}
+
+eqPreampEl.addEventListener('input', () => {
+  setEqPreamp(parseFloat(eqPreampEl.value), true);
+});
+
+// ---------------------------------------------------------------- EQ 预设（自定义 / 导入）
+
+const eqNameRow = document.getElementById('eqNameRow');
+const eqNameEl = document.getElementById('eqPresetName');
+const eqNoticeEl = document.getElementById('eqNotice');
+const eqFileEl = document.getElementById('eqFile');
+
+let eqPresetSig = '';
+
+const escHtml = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function postEqPreset(body) {
+  const r = await fetch('/api/eq/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+    .then((x) => x.json())
+    .catch((e) => ({ ok: false, error: String(e) }));
+  if (!r.ok) showWarn(r.error || 'EQ 预设操作失败');
+  return r;
+}
+
+function fillEqPreset() {
+  const sel = document.getElementById('selEqPreset');
+  const del = document.getElementById('btnEqDel');
+  if (!sel || !state) return;
+  const list = state.eq_presets || [];
+  const active = state.eq_preset || '';
+  const sig = list.map((p) => p.name + (p.builtin ? 'B' : 'U')).join('|') + '#' + active;
+  if (sig !== eqPresetSig) {
+    eqPresetSig = sig;
+    sel.innerHTML = '';
+    // 手改过曲线时给一个占位项：这时候还显示别的预设名就是在骗人
+    if (!active) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = '（未保存的调整）';
+      sel.appendChild(o);
+    }
+    list.forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.name;
+      o.textContent = p.builtin ? p.name : p.name + ' · 自定';
+      sel.appendChild(o);
+    });
+    sel.value = active;
+  }
+  if (document.activeElement !== sel) sel.value = active;
+
+  const cur = list.find((p) => p.name === sel.value);
+  del.disabled = !cur || cur.builtin;
+  del.style.opacity = del.disabled ? 0.4 : 1;
+  del.style.cursor = del.disabled ? 'not-allowed' : 'pointer';
+}
+
+document.getElementById('selEqPreset').addEventListener('change', async (e) => {
+  if (!e.target.value) return;
+  const r = await postEqPreset({ action: 'apply', name: e.target.value });
+  // 放开远端覆盖：不然最近 900 ms 内的本地编辑会压着刚套用的曲线不放
+  if (r.ok) eqEditAt = 0;
+});
+
+document.getElementById('btnEqSave').addEventListener('click', () => {
+  const showing = !eqNameRow.hidden;
+  eqNameRow.hidden = showing;
+  if (!showing) {
+    eqNameEl.value = (state && state.eq_preset) || '';
+    eqNameEl.focus();
+    eqNameEl.select();
+  }
+});
+
+document.getElementById('btnEqPresetCancel').addEventListener('click', () => {
+  eqNameRow.hidden = true;
+});
+
+async function commitEqPreset() {
+  const name = eqNameEl.value.trim();
+  if (!name) {
+    eqNameEl.focus();
+    return;
+  }
+  const preamp = parseFloat(eqPreampEl.value) || 0;
+  // 掐掉排队中的 params 请求：它晚一步到，会把刚设好的预设名又抹成「未保存」
+  clearTimeout(sendTimer);
+  const r = await postEqPreset({
+    action: 'save',
+    name,
+    preamp,
+    bands: eqBandsPayload(),
+  });
+  if (r.ok) eqNameRow.hidden = true;
+}
+
+document.getElementById('btnEqPresetOk').addEventListener('click', commitEqPreset);
+eqNameEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') commitEqPreset();
+  if (e.key === 'Escape') eqNameRow.hidden = true;
+});
+
+document.getElementById('btnEqDel').addEventListener('click', async () => {
+  const sel = document.getElementById('selEqPreset');
+  if (!sel.value) return;
+  await postEqPreset({ action: 'delete', name: sel.value });
+});
+
+// ---------------------------------------------------------------- 导入
+
+function eqNotice(html, bad) {
+  if (!eqNoticeEl) return;
+  eqNoticeEl.innerHTML = html;
+  eqNoticeEl.classList.toggle('bad', !!bad);
+  eqNoticeEl.classList.remove('hidden');
+}
+
+document.getElementById('btnEqImport').addEventListener('click', () => eqFileEl.click());
+
+eqFileEl.addEventListener('change', () => {
+  const f = eqFileEl.files && eqFileEl.files[0];
+  // 先清空：连着导入同一个文件时，不清空就不会再触发 change
+  eqFileEl.value = '';
+  if (f) importEqFile(f);
+});
+
+async function importEqFile(file) {
+  let text = '';
+  try {
+    text = await file.text();
+  } catch (e) {
+    showWarn('读不到文件：' + e);
+    return;
+  }
+  const r = await fetch('/api/eq/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+    .then((x) => x.json())
+    .catch((e) => ({ ok: false, error: String(e) }));
+
+  if (!r.ok) {
+    const msg = r.error || '未知错误';
+    eqNotice('导入失败：' + escHtml(msg), true);
+    showWarn('导入失败：' + msg);
+    return;
+  }
+  await applyImported(r, file.name || '');
+}
+
+/** 把解析结果落到界面与后端，并顺手存成预设。 */
+async function applyImported(r, fileName) {
+  const stem = String(fileName).replace(/\.[^.]+$/, '').trim().slice(0, 32) || '导入的 EQ';
+  eqBands = (r.bands || []).map((b) => ({
+    type: b.type,
+    freq: b.freq,
+    q: b.q,
+    gain: b.gain,
+  }));
+  eqRowSig = '';
+  ensureEqRows();
+  setEqPreamp(r.preamp, false);
+  // 900 ms 内以本地为准：params 请求还在路上，这会儿去读远端会读到旧曲线
+  eqEditAt = Date.now();
+  drawEqChart(true);
+
+  pushParams({ eq_bands: eqBandsPayload(), eq_preamp: r.preamp });
+
+  // 导入一次就存一条预设 —— 否则下次还得回去翻那个 txt
+  clearTimeout(sendTimer);
+  const saved = await postEqPreset({
+    action: 'save',
+    name: stem,
+    preamp: r.preamp,
+    bands: eqBandsPayload(),
+  });
+  pushParams({ eq_bands: eqBandsPayload(), eq_preamp: r.preamp });
+
+  const notes = (r.notes || []).length ? '　' + r.notes.map(escHtml).join('；') : '';
+  eqNotice(
+    `已导入 <b>${escHtml(stem)}</b>（${escHtml(r.format || '')}）：` +
+      `${eqBands.length} 个频点 · 前级 ${fmt(r.preamp)} dB` +
+      (saved.ok ? '　已存为预设' : '　<b>存为预设失败</b>：' + escHtml(saved.error || '')) +
+      notes,
+    !saved.ok
+  );
+}
+
 document.getElementById('eqOn').addEventListener('change', (e) => {
   eqEditAt = Date.now();
   pushParams({ eq_on: e.target.checked });
@@ -1157,6 +1365,10 @@ function renderEq() {
   // 总开关关掉时压暗曲线：参数还在，但耳朵听不到，不压暗会让人以为调了没反应
   const chart = document.getElementById('eqChart');
   if (chart) chart.classList.toggle('off', !on);
+
+  fillEqPreset();
+  // 拖滑条时别回写（range 拿焦点就意味着正在拖）
+  if (document.activeElement !== eqPreampEl) setEqPreamp(state.params.eq_preamp, false);
 }
 
 // ---------------------------------------------------------------- VB-CABLE 前置
@@ -1254,6 +1466,8 @@ document.querySelectorAll('.tab').forEach((b) => {
   try {
     t = localStorage.getItem(LS_TAB) || 'mix';
   } catch (_) {}
+  // 托盘里的「导入 / 管理…」会用 /#eq 打开，这里认一下
+  if (location.hash === '#eq') t = 'eq';
   switchTab(t === 'eq' ? 'eq' : 'mix');
 })();
 
