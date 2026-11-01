@@ -81,6 +81,10 @@ pub const MAX_GAIN_DB: f32 = 20.0;
 struct Runtime {
   stop: Arc<AtomicBool>,
   threads: Vec<std::thread::JoinHandle<()>>,
+  /// 实际打开的端点 id（None = 走的系统默认设备）
+  source_id: Option<String>,
+  sink_id: Option<String>,
+  /// 给人看的名字。存 id 的话状态栏会是一串 GUID，用户根本没法确认选对没选对。
   source_label: String,
   sink_label: String,
 }
@@ -93,6 +97,46 @@ static RT: Mutex<Option<Runtime>> = Mutex::new(None);
 /// `Activate` + `GetMixFormat`，几十毫秒起步。不缓存的话光是轮询就能烧掉半核。
 /// 插拔设备后点界面上的"刷新设备"清空缓存。
 static EPS: Mutex<Vec<audio_platform::Endpoint>> = Mutex::new(Vec::new());
+
+/// 端点 id → 给人看的名字。
+///
+/// 缓存里找不到（刚插拔、或缓存还没建）就退回 id 本身 —— 显示 GUID 难看，
+/// 但比显示"未知设备"更有助于排查。
+fn endpoint_name(id: Option<&str>) -> String {
+  let Some(id) = id.filter(|s| !s.is_empty()) else {
+    return "系统默认输出".into();
+  };
+  endpoints_cached()
+    .iter()
+    .find(|e| e.id == id)
+    .map(|e| {
+      if e.name.is_empty() {
+        e.label.clone()
+      } else {
+        e.name.clone()
+      }
+    })
+    .unwrap_or_else(|| id.to_string())
+}
+
+/// 按下拉索引从**填充时的快照**里取端点 id。
+///
+/// 抽成独立函数是为了让这条不变量能被测试钉住：索引只对"填进去的那份列表"有效。
+/// 拿实时枚举缓存反查的话，列表一旦重排（改了 7.1、插拔设备、点「刷新设备」），
+/// 同一个下标就指向另一个设备 —— 症状正是"我选了输出 2，启动却开了 1"。
+///
+/// `sel` 为 None = 控件报"没有选中项"；`last` 是上次记住的选择。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn pick_by_index(
+  table: &[String],
+  last: Option<&String>,
+  sel: Option<usize>,
+) -> Option<String> {
+  match sel {
+    Some(i) => table.get(i).cloned().or_else(|| last.cloned()),
+    None => last.cloned(),
+  }
+}
 
 pub fn endpoints_cached() -> Vec<audio_platform::Endpoint> {
   let mut g = match EPS.lock() {
@@ -316,13 +360,17 @@ fn hrir_names() -> Vec<String> {
 pub fn state_json(shared: &Arc<Shared>) -> Value {
   let p = shared.params.lock().map(|p| p.clone()).unwrap_or_default();
   let lv = shared.levels.lock().map(|l| *l).unwrap_or_default();
-  let (running, src, snk, err) = RT
+  // source/sink 给 id（网页端拿它当 <option> 的 value 用），
+  // source_label/sink_label 给名字（给人看）。
+  let (running, src, snk, src_name, snk_name, err) = RT
     .lock()
     .ok()
     .and_then(|g| {
       g.as_ref().map(|r| {
         (
           true,
+          r.source_id.clone(),
+          r.sink_id.clone(),
           r.source_label.clone(),
           r.sink_label.clone(),
           None::<String>,
@@ -346,6 +394,8 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
     "running": running,
     "source": src,
     "sink": snk,
+    "source_label": src_name,
+    "sink_label": snk_name,
     "error": err.or(st.error.clone()),
     "endpoints": endpoints,
     "params": {
@@ -621,18 +671,26 @@ pub fn start(shared: &Arc<Shared>, body: &[u8]) -> String {
     .spawn(move || engine::run_processor(sh2, in_cons, out_prod, st2, hrir))
     .expect("spawn processor");
 
-  let src_label = source.clone().unwrap_or_else(|| "系统默认输出".into());
-  let snk_label = sink.clone().unwrap_or_else(|| "系统默认输出".into());
+  let src_label = endpoint_name(source.as_deref());
+  let snk_label = endpoint_name(sink.as_deref());
   if let Ok(mut g) = RT.lock() {
     *g = Some(Runtime {
       stop: stop_flag,
       threads: vec![cap, proc, ren],
-      source_label: src_label,
-      sink_label: snk_label,
+      source_id: source.clone(),
+      sink_id: sink.clone(),
+      source_label: src_label.clone(),
+      sink_label: snk_label.clone(),
     });
   }
+  // 把「实际开的哪个设备」原样回给调用方：GUI 和网页都能立刻确认，
+  // 而不是各自猜自己刚才选的是什么。
   json!({
     "ok": true,
+    "source": source,
+    "sink": sink,
+    "source_label": src_label,
+    "sink_label": snk_label,
     "hrir": hrir_label,
     "hrir_measured": hrir_measured,
     "warning": hrir_warn,
@@ -832,3 +890,60 @@ pub fn stop() -> String {
 const INDEX: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
 const STYLE: &str = include_str!("web/style.css");
+
+#[cfg(test)]
+mod tests {
+  use super::{endpoint_name, pick_by_index};
+
+  fn v(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn index_is_resolved_against_fill_time_snapshot() {
+    // 界面填进去的顺序
+    let snapshot = v(&["A", "B", "C"]);
+    // 用户点的是第 3 项
+    assert_eq!(
+      pick_by_index(&snapshot, None, Some(2)).as_deref(),
+      Some("C")
+    );
+
+    // 之后缓存被重新枚举、顺序变了（改了 7.1 配置、插拔设备都会这样）。
+    // 旧实现拿"实时缓存 + 同一个下标"反查，第 3 项就变成了 B —— 这正是那个 bug。
+    let live = v(&["C", "A", "B"]);
+    assert_eq!(
+      pick_by_index(&live, None, Some(2)).as_deref(),
+      Some("B"),
+      "这条只是说明错位长什么样；真正取值的路径必须是快照"
+    );
+    assert_eq!(
+      pick_by_index(&snapshot, None, Some(2)).as_deref(),
+      Some("C"),
+      "快照没变，用户选谁就是谁"
+    );
+  }
+
+  #[test]
+  fn endpoint_name_degrades_instead_of_going_blank() {
+    // 没指定 = 走的系统默认端点
+    assert_eq!(endpoint_name(None), "系统默认输出");
+    assert_eq!(endpoint_name(Some("")), "系统默认输出");
+    // 缓存里查不到就退回 id：难看，但比空标题有用
+    assert_eq!(endpoint_name(Some("mock-unknown")), "mock-unknown");
+  }
+
+  #[test]
+  fn missing_selection_falls_back_to_last_pick() {
+    let last = "A".to_string();
+    // 下拉为空 / 控件报 CB_ERR：不能静默变成「系统默认设备」
+    assert_eq!(pick_by_index(&[], Some(&last), None).as_deref(), Some("A"));
+    // 下标越界（列表被重建过）也一样退回上次的选择
+    assert_eq!(
+      pick_by_index(&[], Some(&last), Some(3)).as_deref(),
+      Some("A")
+    );
+    // 什么都不知道就老实返回 None，让调用方去提示，而不是猜一个设备
+    assert_eq!(pick_by_index(&[], None, None), None);
+  }
+}

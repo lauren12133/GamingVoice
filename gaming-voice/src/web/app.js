@@ -292,30 +292,38 @@ function fillSelect(id, eps, isSource) {
   const sel = document.getElementById(id);
   if (!eps || eps.length === 0) return;
   const sig = eps.map((e) => e.id + e.channels).join('|');
-  if (sel.dataset.sig === sig) return;   // 没变就不动 DOM，避免打断用户点选
-  sel.dataset.sig = sig;
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    eps.forEach((e) => {
+      const o = document.createElement('option');
+      o.value = e.id;
+      const who = e.name || e.label;
+      o.textContent =
+        (e.surround ? '★ ' : '') + who + '（' + e.channels + ' 声道）' +
+        (e.default ? ' · 默认' : '');
+      sel.appendChild(o);
+    });
 
-  const prev = sel.value;
-  sel.innerHTML = '';
-  eps.forEach((e) => {
-    const o = document.createElement('option');
-    o.value = e.id;
-    const who = e.name || e.label;
-    o.textContent =
-      (e.surround ? '★ ' : '') + who + '（' + e.channels + ' 声道）' +
-      (e.default ? ' · 默认' : '');
-    sel.appendChild(o);
-  });
-
-  if (prev && eps.some((e) => e.id === prev)) {
-    sel.value = prev;
-    return;
+    if (prev && eps.some((e) => e.id === prev)) {
+      sel.value = prev;
+    } else {
+      // 首次：源优先 8 声道，输出优先非 8 声道（通常是耳机）
+      const pick = isSource
+        ? eps.find((e) => e.surround) || eps[0]
+        : eps.find((e) => !e.surround) || eps[0];
+      if (!userPickedDevice) sel.value = pick.id;
+    }
   }
-  // 首次：源优先 8 声道，输出优先非 8 声道（通常是耳机）
-  const pick = isSource
-    ? eps.find((e) => e.surround) || eps[0]
-    : eps.find((e) => !e.surround) || eps[0];
-  if (!userPickedDevice) sel.value = pick.id;
+
+  // 跑起来之后，以**后端实际打开的端点**为准：
+  // 可能是刚才在托盘菜单 / 原生窗口里改的，网页这边不能还显示旧设备 ——
+  // 否则界面上写着 1、耳朵里听的是 2，只能靠猜。
+  const live = state && state.running ? (isSource ? state.source : state.sink) : null;
+  if (live && !userPickedDevice && eps.some((e) => e.id === live)) {
+    if (document.activeElement !== sel) sel.value = live;
+  }
 }
 
 function updateMeta() {

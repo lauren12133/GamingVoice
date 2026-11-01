@@ -76,6 +76,13 @@ struct Ctx {
   /// 下拉框里当前选中的端点 id（不直接读控件，避免重建时丢失）
   src: Option<String>,
   snk: Option<String>,
+  /// 填充下拉那一刻的端点 id 快照，**顺序与下拉项严格一一对应**。
+  ///
+  /// 不能拿实时的 `endpoints_cached()` 按索引反查：那份缓存会被「刷新设备」
+  /// 重新枚举（排序键含声道数和 label，改了 7.1 配置就会换位置），
+  /// 于是第 3 项昨天是耳机、今天是 CABLE —— 用户选的是 2，启动却开了 1。
+  src_ids: Vec<String>,
+  snk_ids: Vec<String>,
   /// 已经贴到托盘上了？
   tray: bool,
   /// 防止连点"启动"重入
@@ -125,6 +132,8 @@ pub fn run(shared: Arc<Shared>) {
       font: font.0 as isize,
       src: None,
       snk: None,
+      src_ids: Vec::new(),
+      snk_ids: Vec::new(),
       tray: false,
       busy: false,
       hrir: None,
@@ -400,6 +409,15 @@ unsafe fn fill_combos(hwnd: HWND) {
     .and_then(|c| c.as_ref().map(|c| (c.src.clone(), c.snk.clone())))
     .unwrap_or((None, None));
 
+  // 两个下拉是同一份列表、同一个顺序，快照一次就够
+  let ids: Vec<String> = eps.iter().map(|e| e.id.clone()).collect();
+  if let Ok(mut g) = CTX.lock() {
+    if let Some(c) = g.as_mut() {
+      c.src_ids = ids.clone();
+      c.snk_ids = ids.clone();
+    }
+  }
+
   for (id, want_surround, keep) in [(ID_SRC, true, keep_src), (ID_SNK, false, keep_snk)] {
     let ctl = unsafe { GetDlgItem(Some(hwnd), id as i32) }.unwrap_or_default();
     if ctl.0.is_null() {
@@ -456,13 +474,28 @@ unsafe fn fill_combos(hwnd: HWND) {
 }
 
 /// 读某个下拉框当前选中项的端点 id。
+///
+/// 走**填充时的快照**而不是实时枚举缓存：下拉项和快照是同一次循环里写进去的，
+/// 索引天然对得上；实时缓存一旦重排过，索引就会指向另一个设备。
 unsafe fn combo_id(hwnd: HWND, id: usize) -> Option<String> {
   let ctl = unsafe { GetDlgItem(Some(hwnd), id as i32) }.ok()?;
-  let sel = unsafe { SendMessageW(ctl, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))) }.0;
-  if sel < 0 {
+  // 句柄无效时 SendMessageW 返回 0，那个 0 会被当成"选中了第 1 项"——
+  // 于是不管用户点的是谁，启动都开列表第一个。必须在这里挡掉。
+  if ctl.0.is_null() {
     return None;
   }
-  endpoints_cached().get(sel as usize).map(|e| e.id.clone())
+  let sel = unsafe { SendMessageW(ctl, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))) }.0;
+  let g = CTX.lock().ok()?;
+  let c = g.as_ref()?;
+  let (table, last) = if id == ID_SRC {
+    (&c.src_ids, &c.src)
+  } else {
+    (&c.snk_ids, &c.snk)
+  };
+  // 控件报「没选中」（CB_ERR = -1）时交给 None，由 pick_by_index 退回上次的选择，
+  // 总比静默变成「系统默认设备」强。
+  let idx = usize::try_from(sel).ok();
+  crate::pick_by_index(table, last.as_ref(), idx)
 }
 
 // ---------------------------------------------------------------- 状态刷新
@@ -680,6 +713,28 @@ fn do_start(hwnd: HWND) {
   if is_running() {
     return;
   }
+  // 先取出两个下拉的当前值。取不到就直接说清楚，**绝不**把 null 递下去：
+  // 后端收到 null 会落到「系统默认设备」，用户看到的现象就是
+  // "我明明把输出改成了 2，它启动用的还是 1"，而且没有任何提示。
+  let (mut src, mut snk) = unsafe { (combo_id(hwnd, ID_SRC), combo_id(hwnd, ID_SNK)) };
+  if src.is_none() || snk.is_none() {
+    // 下拉还是空的（首次枚举失败、或者插上设备后才开程序）：自己重试一次，
+    // 别让用户先想明白"是不是得点一下刷新设备"。
+    do_refresh(hwnd);
+    src = unsafe { combo_id(hwnd, ID_SRC) };
+    snk = unsafe { combo_id(hwnd, ID_SNK) };
+  }
+  if src.is_none() || snk.is_none() {
+    unsafe {
+      MessageBoxW(
+        Some(hwnd),
+        w!("还没有读到可选设备。\n\n请点「刷新设备」重新枚举，或在 声音设置 里确认设备已启用。"),
+        w!("无法启动"),
+        MB_OK | MB_ICONWARNING,
+      );
+    }
+    return;
+  }
   {
     let Ok(mut g) = CTX.lock() else { return };
     let Some(c) = g.as_mut() else { return };
@@ -687,17 +742,15 @@ fn do_start(hwnd: HWND) {
       return;
     }
     c.busy = true;
+    // 把界面上的选择同步进上下文：状态栏、下次重建下拉都用它
+    c.src = src.clone();
+    c.snk = snk.clone();
   }
   let hrir = CTX
     .lock()
     .ok()
     .and_then(|g| g.as_ref().and_then(|c| c.hrir.clone()));
-  let body = unsafe {
-    let src = combo_id(hwnd, ID_SRC);
-    let snk = combo_id(hwnd, ID_SNK);
-    // hrir 为 null 时后端自动取 hrir/ 里第一个
-    serde_json::json!({ "source": src, "sink": snk, "hrir": hrir }).to_string()
-  };
+  let body = serde_json::json!({ "source": src, "sink": snk, "hrir": hrir }).to_string();
   let shared = CTX
     .lock()
     .ok()
