@@ -13,25 +13,29 @@ use crate::dsp::surround::hrir::EARS;
 use crate::dsp::surround::layout::{Speaker, CHANNELS};
 use crate::dsp::surround::{Hrir, Spatial, SpatialParams};
 
-use crate::audio::{HOP, SAMPLE_RATE};
+use crate::audio::SAMPLE_RATE;
 
-/// **处理块长（样本），锁定为 480 = 10 ms。**
+/// **默认处理块长（样本）：128 = 2.7 ms。** 用户可在界面 [`BLOCK_MIN`]..=[`BLOCK_MAX`] 内调整。
 ///
-/// 为什么锁死、不再开放给界面：
+/// 为什么默认 128：
 ///
-/// 1. 480 正好等于 WASAPI 的共享模式周期（48 kHz / 480 帧），也等于本工具的取数单位
-///    `HOP`。处理块与取数块一致时，环的读写节奏天然对齐，不会累积或溢出。
-/// 2. 实测把块长降到 128/64 会听到"电流声"。**根因不是小块本身**，而是旧实现里
-///    取数用 `HOP`、处理用 `block`：一次 pop 480 帧却只消费 128 帧，剩下 352 帧被
-///    丢掉，于是每 10 ms 只有前 2.7 ms 有声音 —— 听起来就是周期性的咔哒/电流声。
-///    这个 bug 已修（下面 `run_processor` 统一按 [`BLOCK`] 取数与处理），
-///    但为了不在竞技场景里再引入任何抖动，**默认仍然锁 480**。
-/// 3. 采样率固定 48 kHz 时，480 的唯一代价是 10 ms 块延迟，而这 10 ms 与音频引擎
-///    自身的周期完全重叠，不叠加。
+/// 1. 卷积是精确的 overlap-save，换块长不改声音（`block_change_keeps_signal_intact`
+///    测试钉住了这点）；小块长的代价只有 CPU —— 分区数翻倍，频域乘法量上升。
+/// 2. 旧实现里取数用 `HOP`、处理用 `block`：一次 pop 480 帧却只消费 128 帧、丢 352 帧，
+///    听感就是"电流声"。该 bug 已修（`run_processor` 统一按当前块长取数与处理），
+///    与块长本身无关。
+/// 3. 采样率固定 48 kHz 时，128 帧 = 2.7 ms。注意采集端 WASAPI 周期仍是 10 ms，
+///    数据每 10 ms 到环一次，所以单改块长本身不降端到端延迟，只是把「攒满一块」
+///    的门槛从 480 帧降到 128 帧。
 ///
-/// 想重新开放（比如将来做 128 帧独占模式）：把界面上的块长控件取消注释，
-/// 让 `Params::block` 回到结构体里，并把 `run_processor` 里的 `BLOCK` 换成它即可。
-pub const BLOCK: usize = HOP;
+/// 代价：块长越小分区越多、每秒频域乘法越多，**会略微增加 CPU 占用**。
+pub const BLOCK: usize = 128;
+
+/// 用户可选的块长下限（样本）：64 = 1.3 ms。
+pub const BLOCK_MIN: usize = 64;
+
+/// 用户可选的块长上限（样本）：480 = 10 ms（= 采集周期，再大环会饥饿、只增延迟）。
+pub const BLOCK_MAX: usize = 480;
 
 /// 用户可调参数。**每 block 从 `Shared` 读一次**，不做重建 —— 改推子立即生效。
 #[derive(Clone, Debug)]
@@ -45,6 +49,8 @@ pub struct Params {
   pub eq_on: bool,
   /// EQ 链首的前级（dB）。导入 EqualizerAPO 配置时那里面的 `Preamp` 就落在这。
   pub eq_preamp: f32,
+  /// 处理块长（样本），可在 [`BLOCK_MIN`]..=[`BLOCK_MAX`] 内调整（默认 [`BLOCK`]）。
+  pub block: usize,
 }
 
 impl Default for Params {
@@ -57,6 +63,7 @@ impl Default for Params {
       eq_bands: eq::default_bands(),
       eq_on: true,
       eq_preamp: 0.0,
+      block: BLOCK,
     }
   }
 }
@@ -204,6 +211,39 @@ pub fn hrir_dirs() -> Vec<PathBuf> {
   dirs
 }
 
+/// 用户数据目录名。和 `hrir/` 一样放在 exe 同级，开发时在项目根。
+pub const DATA_DIR: &str = "data";
+
+/// 依次尝试的数据目录：exe 所在目录 → 当前工作目录（与 [`hrir_dirs`] 同一套口径）。
+///
+/// 预设是用户资产，放程序目录后：解压版/绿色版就在 exe 旁边，换机器整目录拷走即可；
+/// 开发时（`cargo run`）exe 在 `target/` 里，当前工作目录是项目根，两个都试才能两边不落空。
+pub fn data_dirs() -> Vec<PathBuf> {
+  let mut dirs = Vec::new();
+  if let Some(d) = std::env::current_exe()
+    .ok()
+    .and_then(|p| p.parent().map(|d| d.join(DATA_DIR)))
+  {
+    dirs.push(d);
+  }
+  if let Some(d) = std::env::current_dir().ok().map(|d| d.join(DATA_DIR)) {
+    dirs.push(d);
+  }
+  dirs.dedup();
+  dirs
+}
+
+/// 首选数据目录（**写**文件用；读也认它）。
+///
+/// 写文件前由调用方 `create_dir_all`。目录建不出来（例如 exe 装在不可写的
+/// `Program Files`）会返回错误、不会静默换地方 —— 免得用户以为存上了其实没存上。
+pub fn data_dir() -> PathBuf {
+  data_dirs()
+    .into_iter()
+    .next()
+    .unwrap_or_else(std::env::temp_dir)
+}
+
 /// 列出所有可用的 HRIR 文件（`.wav`，跨目录按文件名去重，最后按路径排序）。
 pub fn list_hrir_files() -> Vec<PathBuf> {
   let mut out: Vec<PathBuf> = Vec::new();
@@ -293,20 +333,32 @@ pub fn run_processor(
     st.hrir_name = hrir.name.clone();
     st.hrir_measured = measured;
   }
-  let mut sp = Spatial::with_block(hrir, params.to_spatial(), BLOCK);
+  // 处理块长：从参数里读，可在 BLOCK_MIN..=BLOCK_MAX 内热改（改动会重建卷积器与缓冲）。
+  let mut block = params.block.clamp(BLOCK_MIN, BLOCK_MAX);
+  let mut sp = Spatial::with_block(hrir.clone(), params.to_spatial(), block);
   let mut eq = Eq::new(SAMPLE_RATE as f32);
 
-  // 取数块与处理块必须是同一个值（[`BLOCK`]）。旧实现里一个用 HOP、一个用可调 block，
+  // 取数块与处理块必须是同一个值（当前 `block`）。旧实现里一个用 HOP、一个用可调 block，
   // 结果每次只消费 480 中的 128 帧，剩下的被丢掉 → 周期性断续，听感就是"电流声"。
-  let mut bus: Vec<Vec<f32>> = vec![vec![0.0; BLOCK]; CHANNELS];
-  let mut l = vec![0.0f32; BLOCK];
-  let mut r = vec![0.0f32; BLOCK];
+  let mut bus: Vec<Vec<f32>> = vec![vec![0.0; block]; CHANNELS];
+  let mut l = vec![0.0f32; block];
+  let mut r = vec![0.0f32; block];
   let mut scratch = [0.0f32; CHANNELS];
   let mut last_stat = Instant::now();
 
   while !stop.load(Ordering::Relaxed) {
     // 参数可能被界面改了：每块读一次（互斥锁在无竞争时几乎免费）
     if let Ok(p) = shared.params.lock() {
+      // 块长变化 → 重建空间化引擎与缓冲（卷积器分区、窗口尺寸都跟着块长走）。
+      // 这是低频操作（用户改一次才触发一次），重建会清掉旧 overlap，短暂一跳后恢复。
+      let want = p.block.clamp(BLOCK_MIN, BLOCK_MAX);
+      if want != block {
+        block = want;
+        sp = Spatial::with_block(hrir.clone(), p.to_spatial(), block);
+        bus = vec![vec![0.0; block]; CHANNELS];
+        l = vec![0.0f32; block];
+        r = vec![0.0f32; block];
+      }
       params = p.clone();
       sp.set_params(params.to_spatial());
     }
@@ -316,14 +368,14 @@ pub fn run_processor(
     eq.set_bands(&params.eq_bands);
 
     // 环里不够一块：睡 1 ms 再看（渲染端会补静音，不会卡）
-    if src.slots() < BLOCK * CHANNELS {
+    if src.slots() < block * CHANNELS {
       std::thread::sleep(std::time::Duration::from_millis(1));
       continue;
     }
 
     // 取一块的 8 声道
     let mut in_peak = [0.0f32; CHANNELS];
-    for t in 0..BLOCK {
+    for t in 0..block {
       for ((dst, slot), peak) in bus
         .iter_mut()
         .zip(scratch.iter_mut())
@@ -344,14 +396,14 @@ pub fn run_processor(
 
     // 写双耳（交错 L/R）
     let mut ear_peak = [0.0f32; EARS];
-    for t in 0..BLOCK {
+    for t in 0..block {
       ear_peak[0] = ear_peak[0].max(l[t].abs());
       ear_peak[1] = ear_peak[1].max(r[t].abs());
       let _ = dst.push(l[t]);
       let _ = dst.push(r[t]);
     }
 
-    shared.frames.fetch_add(BLOCK as u64, Ordering::Relaxed);
+    shared.frames.fetch_add(block as u64, Ordering::Relaxed);
     if last_stat.elapsed().as_millis() >= 50 {
       let buf_ms = src.slots() as f32 * 1000.0 / (SAMPLE_RATE as f32 * CHANNELS as f32);
       shared

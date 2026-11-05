@@ -1,7 +1,7 @@
 //! 方向增益预设：内置 5 组 + 用户自定义（可命名、可删、落盘）。
 //!
-//! 落盘位置在**用户数据目录**而不是程序目录：装到 `Program Files` 时程序目录不可写，
-//! 而预设是用户资产，不能因为换个安装位置就丢。
+//! 落盘在程序目录的 `data/presets.json`（`data/` 与 `hrir/` 同级，启动时自动创建）。
+//! 预设是用户资产，跟着 exe 走 —— 整目录拷走就是备份，换版本/换机器不会丢也不会散。
 //!
 //! 只存方向增益（8 个 dB 值）。总补偿 `makeup_db` 是全局电平，跟着设备走，不属于预设。
 
@@ -55,17 +55,8 @@ pub fn builtins() -> Vec<Preset> {
 
 // ---------------------------------------------------------------- 存储
 
-fn data_dir() -> PathBuf {
-  let base = std::env::var_os("APPDATA")
-    .map(PathBuf::from)
-    .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
-    .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    .unwrap_or_else(std::env::temp_dir);
-  base.join("GamingVoice")
-}
-
 fn store_path() -> PathBuf {
-  data_dir().join("presets.json")
+  crate::engine::data_dir().join("presets.json")
 }
 
 /// 读用户预设。文件不存在 / 坏了都当"没有"，不让一个坏 JSON 拦住启动。
@@ -108,7 +99,7 @@ fn parse_list(node: Option<&Value>) -> Vec<Preset> {
 }
 
 fn write_user(list: &[Preset]) -> Result<(), String> {
-  let dir = data_dir();
+  let dir = crate::engine::data_dir();
   std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败 {}：{e}", dir.display()))?;
   let arr: Vec<Value> = list.iter().map(|p| p.to_json()).collect();
   let text = json!({ "version": 1, "presets": arr }).to_string();

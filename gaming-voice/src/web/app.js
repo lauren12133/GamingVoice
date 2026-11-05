@@ -231,6 +231,12 @@ function render() {
   const mk = document.getElementById('makeup');
   if (document.activeElement !== mk) mk.value = s.params.makeup_db;
 
+  // 块长回填：以后端实际生效值为准（可能被夹到 64..=480）
+  if (blockEl && s.params.block) {
+    const b = String(s.params.block);
+    if (document.activeElement !== blockEl && blockEl.value !== b) blockEl.value = b;
+  }
+
   // 推子（拖动时不回写，否则跟手指打架）
   if (!dragging) {
     document.querySelectorAll('.ch').forEach((row, i) => {
@@ -535,7 +541,7 @@ mkEl.addEventListener('input', (e) => {
   pushParams({ makeup_db: v });
 });
 
-// 块长控件：HTML 里已注释，这里做了存在性判断 —— 将来取消注释就能直接用
+// 块长控件：改动即时下发，后端会夹到合法范围（64..=480），render 里再回填实际值
 const blockEl = document.getElementById('block');
 if (blockEl) {
   blockEl.addEventListener('change', (e) => {

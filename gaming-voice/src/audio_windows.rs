@@ -19,11 +19,12 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::core::Interface;
 use windows::Win32::Media::Audio::{
-  eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
-  IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
-  AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-  WAVEFORMATEX,
+  eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioClient3, IAudioRenderClient,
+  IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
+  AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+  AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
@@ -173,6 +174,71 @@ fn resolve_device(id: Option<&str>) -> Result<IMMDevice, String> {
   }
 }
 
+/// 查询渲染端可用的目标周期（帧），目标 128（2.67ms）；查不到返回 `None`。
+///
+/// `GetSharedModeEnginePeriod` 返回引擎支持的周期范围，`InitializeSharedAudioStream`
+/// 的 `PeriodInFrames` 必须是 `fundamental` 的整数倍、且落在 `min..=max`。
+/// 目标 128 不满足时按此规则就近取一个合法值。
+///
+/// 注意：**loopback 采集端走不了这条路**。`InitializeSharedAudioStream` 的 `StreamFlags`
+/// 只支持 `EVENTCALLBACK`、不支持 `LOOPBACK`；而 `IAudioClient::Initialize` 在共享模式下
+/// `hnsPeriodicity` 必须为 0（周期由引擎锁为默认 10ms）。所以采集端周期是硬限制，
+/// 本函数只服务于渲染端。
+unsafe fn query_render_target_period(c3: &IAudioClient3, mix: *const WAVEFORMATEX) -> Option<u32> {
+  const TARGET: u32 = 128; // 2.67 ms @48 kHz
+  let mut default_p = 0u32;
+  let mut fund_p = 0u32;
+  let mut min_p = 0u32;
+  let mut max_p = 0u32;
+  unsafe {
+    c3.GetSharedModeEnginePeriod(mix, &mut default_p, &mut fund_p, &mut min_p, &mut max_p)
+  }
+  .ok()?;
+  if fund_p == 0 || min_p == 0 || max_p == 0 || min_p > max_p {
+    return None;
+  }
+  // 目标夹到合法区间，再向下对齐到 fundamental 的整数倍
+  let mut want = TARGET.clamp(min_p, max_p);
+  want = (want / fund_p) * fund_p;
+  if want < min_p {
+    want = min_p;
+  }
+  if want > max_p {
+    want = max_p;
+  }
+  Some(want)
+}
+
+/// 初始化渲染流：优先 IAudioClient3 请求 128 帧小周期（2.67ms），
+/// 设备不支持（查询失败 / 初始化失败）时退回传统 10ms `Initialize`。
+unsafe fn init_render_low_latency(
+  client: &IAudioClient,
+  mix: *const WAVEFORMATEX,
+) -> windows::core::Result<()> {
+  if let Ok(c3) = client.cast::<IAudioClient3>() {
+    if let Some(period) = unsafe { query_render_target_period(&c3, mix) } {
+      if unsafe {
+        c3.InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_EVENTCALLBACK, period, mix, None)
+      }
+      .is_ok()
+      {
+        return Ok(());
+      }
+    }
+  }
+  // 兜底：传统路径（10ms 周期，事件驱动）
+  unsafe {
+    client.Initialize(
+      AUDCLNT_SHAREMODE_SHARED,
+      AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+      100_000, // 10 ms
+      0,
+      mix,
+      None,
+    )
+  }
+}
+
 /// 读一包数据里的第 `f` 帧第 `c` 声道。
 #[inline]
 fn sample_at(base: *const u8, bits: u16, ch: usize, f: usize, c: usize) -> f32 {
@@ -220,11 +286,15 @@ pub fn start_capture(
              请在 声音设置 → 该设备 → 高级 → 默认格式 改成 48000 Hz 后重试。"
           ));
         }
+        // 事件驱动：不再 sleep(1ms) 轮询（在 Windows 上会被量化成 ~15.6ms）。
+        // 共享模式 + 事件驱动要求 hnsBufferDuration / hnsPeriodicity 都传 0。
+        let ev = unsafe { CreateEventW(None, false, false, None) }
+          .map_err(|e| format!("创建采集事件失败：{e}"))?;
         let init = unsafe {
           client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            100_000, // 10 ms
+            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            0,
             0,
             mix,
             None,
@@ -238,15 +308,16 @@ pub fn start_capture(
             format!("初始化 loopback 失败：{e}（该设备可能被独占）")
           }
         })?;
+        unsafe { client.SetEventHandle(ev) }.map_err(|e| format!("绑定采集事件失败：{e}"))?;
         let capture: IAudioCaptureClient = unsafe { client.GetService() }
           .map_err(|e| format!("获取 IAudioCaptureClient 失败：{e}"))?;
         unsafe { client.Start() }.map_err(|e| format!("启动 loopback 失败：{e}"))?;
-        Ok((client, capture, ch as usize, bits))
+        Ok((client, capture, ev, ch as usize, bits))
       })();
 
-      let (client, capture, chn, bits) = match opened {
+      let (client, capture, ev, chn, bits) = match opened {
         Ok(v) => {
-          let _ = on_open.send(Ok((v.2 as u16, SAMPLE_RATE)));
+          let _ = on_open.send(Ok((v.3 as u16, SAMPLE_RATE)));
           v
         }
         Err(e) => {
@@ -256,11 +327,13 @@ pub fn start_capture(
       };
 
       while !stop.load(Relaxed) {
-        let mut drained = false;
+        // 200ms 超时：就算事件丢了也能醒过来检查 stop
+        let w = unsafe { WaitForSingleObject(ev, 200) };
+        if w != WAIT_OBJECT_0 {
+          continue;
+        }
+        // 事件触发后把当前可读的数据全部取走（可能不止一包）
         loop {
-          if stop.load(Relaxed) {
-            break;
-          }
           let frames = match unsafe { capture.GetNextPacketSize() } {
             Ok(f) => f,
             Err(_) => break,
@@ -290,14 +363,11 @@ pub fn start_capture(
             }
             let _ = unsafe { capture.ReleaseBuffer(n) };
           }
-          drained = true;
-        }
-        if !drained {
-          std::thread::sleep(std::time::Duration::from_millis(1));
         }
       }
       unsafe {
         let _ = client.Stop();
+        let _ = CloseHandle(ev);
       }
     })
     .expect("spawn capture")
@@ -332,16 +402,7 @@ pub fn start_render(
         }
         let ev = unsafe { CreateEventW(None, false, false, None) }
           .map_err(|e| format!("创建音频事件失败：{e}"))?;
-        let init = unsafe {
-          client.Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            100_000, // 10 ms
-            0,
-            mix,
-            None,
-          )
-        };
+        let init = unsafe { init_render_low_latency(&client, mix) };
         unsafe { CoTaskMemFree(Some(mix as *const _)) };
         init.map_err(|e| format!("初始化渲染失败：{e}（该设备可能被独占）"))?;
         unsafe { client.SetEventHandle(ev) }.map_err(|e| format!("绑定音频事件失败：{e}"))?;

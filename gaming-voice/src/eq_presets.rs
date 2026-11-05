@@ -1,4 +1,4 @@
-//! EQ 预设：内置「平直」+ 用户自定义（手存 / 导入），落盘 `%APPDATA%\GamingVoice\eq_presets.json`。
+//! EQ 预设：内置「平直」+ 用户自定义（手存 / 导入），落盘程序目录的 `data/eq_presets.json`。
 //!
 //! 和 `presets.rs`（方向增益）分开存：两类预设改的是完全不同的东西（8 个 dB 值 vs 一整条
 //! 滤波器链 + 前级），塞一个文件里只会让"保存这一半顺手清掉那一半"这种 bug 有机可乘。
@@ -67,17 +67,8 @@ pub fn builtins() -> Vec<EqPreset> {
 
 // ---------------------------------------------------------------- 存储
 
-fn data_dir() -> PathBuf {
-  let base = std::env::var_os("APPDATA")
-    .map(PathBuf::from)
-    .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
-    .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    .unwrap_or_else(std::env::temp_dir);
-  base.join("GamingVoice")
-}
-
 fn store_path() -> PathBuf {
-  data_dir().join("eq_presets.json")
+  crate::engine::data_dir().join("eq_presets.json")
 }
 
 /// 读用户预设。文件不存在 / 坏了都当"没有" —— 一个坏 JSON 不该拦住启动。
@@ -142,7 +133,7 @@ fn parse_list(node: Option<&Value>) -> Vec<EqPreset> {
 }
 
 fn write_user(list: &[EqPreset]) -> Result<(), String> {
-  let dir = data_dir();
+  let dir = crate::engine::data_dir();
   std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败 {}：{e}", dir.display()))?;
   let arr: Vec<Value> = list.iter().map(|p| p.to_json()).collect();
   let text = json!({ "version": 1, "presets": arr }).to_string();
@@ -334,7 +325,7 @@ mod tests {
 
   #[test]
   fn round_trips_through_the_file_format() {
-    // 直接测序列化→反序列化这一环（不碰磁盘，避免测试互相踩 APPDATA）
+    // 直接测序列化→反序列化这一环（不碰磁盘，避免测试互相踩数据目录）
     let p = EqPreset {
       name: "测试".into(),
       builtin: false,

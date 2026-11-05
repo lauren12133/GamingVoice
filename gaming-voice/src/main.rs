@@ -24,7 +24,8 @@ use serde_json::{json, Value};
 mod audio {
   /// 全链路统一 48 kHz：I48k 是 Windows 混音的默认值，也是 HRIR 的常见采样率。
   pub const SAMPLE_RATE: u32 = 48_000;
-  /// 引擎 hop（10 ms）。处理块长可以更小，但取数据的单位是它。
+  /// 引擎 hop / 采集周期（10 ms = 480 帧）。DSP 层与延迟模型用它作基准块长；
+  /// 处理块长另见 [`engine::BLOCK`]，已固定为 128。
   pub const HOP: usize = 480;
   /// 7.1 环绕的 8 个声道
   #[allow(dead_code)] // 只有 Windows 的采集/渲染用到（Linux 走 stub）
@@ -152,6 +153,13 @@ pub fn endpoints_cached() -> Vec<audio_platform::Endpoint> {
 }
 
 fn main() {
+  // Windows：把定时器精度提到 1 ms。采集/处理线程里的 `sleep(1 ms)` 默认会被
+  // 量化到 15.6 ms（系统默认定时器 tick），提高精度后才是真正的 ~1 ms，消除采集端轮询抖动。
+  #[cfg(windows)]
+  unsafe {
+    let _ = windows::Win32::Media::timeBeginPeriod(1);
+  }
+
   let shared = Shared::new();
 
   // HRIR 目录：不存在就建一个空目录，用户才知道 wav 该往哪放
@@ -159,6 +167,14 @@ fn main() {
   for dir in engine::hrir_dirs() {
     if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
       println!("已创建 HRIR 目录：{}", dir.display());
+    }
+  }
+
+  // 数据目录：和 HRIR 目录一样在 exe 同级，启动就建好，
+  // 之后保存的预设（presets.json / eq_presets.json）都落在这里。
+  for dir in engine::data_dirs() {
+    if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
+      println!("已创建数据目录：{}", dir.display());
     }
   }
   let found = refresh_hrirs();
@@ -408,7 +424,9 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "eq_preamp_min": dsp::surround::eq::MIN_PREAMP_DB,
       "eq_preamp_max": dsp::surround::eq::MAX_PREAMP_DB,
       "eq_max": dsp::surround::eq::MAX_BANDS,
-      "block": engine::BLOCK,
+      "block": p.block,
+      "block_min": engine::BLOCK_MIN,
+      "block_max": engine::BLOCK_MAX,
     },
     "preset": presets::active_name(),
     // 预设列表跟着 state 走：面板每帧都要用它画下拉，单独发一次请求反而更容易不同步
@@ -433,7 +451,7 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
       "ear_peak": lv.ear_peak,
     },
     "status": {
-      "block_ms": params_block_ms(),
+      "block_ms": block_ms(p.block),
       "buffer_ms": shared.buffer_ms100.load(Ordering::Relaxed) as f32 / 100.0,
       "underruns": shared.underruns.load(Ordering::Relaxed),
       "frames": shared.frames.load(Ordering::Relaxed),
@@ -445,9 +463,9 @@ pub fn state_json(shared: &Arc<Shared>) -> Value {
   })
 }
 
-/// 处理块延迟（毫秒）。块长锁定为 [`engine::BLOCK`]，所以这是个常量。
-fn params_block_ms() -> f32 {
-  engine::BLOCK as f32 * 1000.0 / audio::SAMPLE_RATE as f32
+/// 处理块延迟（毫秒）。块长由用户决定（[`engine::BLOCK_MIN`]..=[`engine::BLOCK_MAX`]）。
+fn block_ms(block: usize) -> f32 {
+  block as f32 * 1000.0 / audio::SAMPLE_RATE as f32
 }
 
 /// 频点列表 → JSON。前端拿它画表格和曲线，字段名要和 `set_params` 的解析对齐。
@@ -544,12 +562,13 @@ fn set_params(shared: &Arc<Shared>, body: &[u8]) -> String {
   if !eq_presets::still_matches(&p.eq_bands, p.eq_preamp) {
     eq_presets::clear_active();
   }
-  // 块长入口已按需求锁死为 480（10 ms），这里显式忽略旧客户端的 block 字段，
-  // 而不是静默接受 —— 免得界面以为改成功了。
-  // 将来要重新开放：把上面 `Params` 的 `block` 字段加回来，并让 `run_processor` 用它。
+  // 块长用户可调：解析后夹到合法范围再写回，避免界面传 0 或超大值。
+  if let Some(b) = v.get("block").and_then(|x| x.as_u64()) {
+    p.block = (b as usize).clamp(engine::BLOCK_MIN, engine::BLOCK_MAX);
+  }
   json!({
     "ok": true,
-    "note": format!("块长固定 {} 样本（10 ms）", engine::BLOCK),
+    "note": format!("块长 {} 样本（{:.1} ms）", p.block, block_ms(p.block)),
   })
   .to_string()
 }

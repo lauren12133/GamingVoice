@@ -462,6 +462,7 @@ main{display:grid;grid-template-columns:1fr 352px;gap:16px;align-items:start}
 .hint{margin:2px 18px 14px;font-size:12px;color:var(--dim2);line-height:1.6}
 
 .globals{padding:0 18px 16px;display:flex;flex-direction:column;gap:14px}
+.globals .hint{margin:0;font-size:12px;color:var(--dim2);line-height:1.6}
 .mini{display:grid;grid-template-columns:58px 1fr 60px;align-items:center;gap:10px}
 .mini>span{font-size:12.5px;color:var(--dim2)}
 .mini>b{font-size:13px;font-family:var(--mono);color:var(--acc2);text-align:right;
