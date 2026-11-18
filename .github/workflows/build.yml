@@ -39,29 +39,28 @@ jobs:
         working-directory: gaming-voice
         run: cargo build --release
 
-      # build.rs 也会复制，但这里再显式兜底一次：无论安装包放在仓库根、
-      # gaming-voice/ 还是 assets/，都保证发布目录里有它。
-      - name: Bundle VB-CABLE installer
+      # 集成 VB-CABLE 压缩包：寻找仓库里的 VBCABLE_Driver.zip 并复制到产物目录
+      - name: Bundle VB-CABLE installer (zip)
         shell: pwsh
         run: |
           $candidates = @(
-            'VBCABLE_Setup_x64.exe',
-            'gaming-voice/VBCABLE_Setup_x64.exe',
-            'gaming-voice/assets/VBCABLE_Setup_x64.exe'
+            'VBCABLE_Driver.zip',
+            'gaming-voice/VBCABLE_Driver.zip',
+            'gaming-voice/assets/VBCABLE_Driver.zip'
           )
           $src = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($src) {
-            Copy-Item $src 'gaming-voice/target/release/VBCABLE_Setup_x64.exe' -Force
-            Write-Host "bundled VB-CABLE installer from: $src"
+            Copy-Item $src 'gaming-voice/target/release/VBCABLE_Driver.zip' -Force
+            Write-Host "bundled VB-CABLE zip from: $src"
           } else {
-            Write-Host 'WARN: VBCABLE_Setup_x64.exe not found in repo'
+            Write-Host 'WARN: VBCABLE_Driver.zip not found in repo'
           }
 
-      - name: Upload release (exe + VB-CABLE installer)
+      - name: Upload release (exe + VB-CABLE zip)
         uses: actions/upload-artifact@v4
         with:
           name: GamingVoice-windows-x64
           path: |
             gaming-voice/target/release/GamingVoice.exe
-            gaming-voice/target/release/VBCABLE_Setup_x64.exe
+            gaming-voice/target/release/VBCABLE_Driver.zip
           if-no-files-found: error
