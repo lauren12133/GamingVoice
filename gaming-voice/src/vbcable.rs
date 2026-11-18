@@ -1,17 +1,17 @@
-//! VB-CABLE 检测 + 一键安装。
+//! VB-CABLE 检测 + 安装引导。
 //!
 //! 为什么这是硬性前置：GamingVoice 的输入端必须是**一条 8 声道的虚拟端点**。
 //! 没有 VB-CABLE，用户能选的只有立体声设备 —— loopback 抓到的是已经下混的 2 声道，
 //! 8 个推子就退化成一个总音量。听感上只是"声音变小了"，看不出哪里错，
 //! 所以必须在界面上把它变成一个**显式的、可安装的前置条件**。
+//!
+//! 安装包**不内嵌进 exe**：VB-CABLE 的 Setup 若从 ZIP 或临时目录直接运行，会报
+//! `Missing inf file / Installation cannot work from a ZIP folder`。改为**外置**：
+//! `VBCABLE_Setup_x64.exe` 随发布包与 `GamingVoice.exe` 同目录分发（build.rs 会在
+//! 编译时把它从仓库根复制到编译输出目录），用户手动双击运行，或点界面按钮由本程序
+//! 代为启动。
 
-/// 安装包本体（VB-CABLE Driver Pack 45，VB-Audio 的 Donationware，
-/// 允许原样再分发；这里内嵌一份，用户不必再去官网找）。
-#[cfg(windows)]
-const SETUP: &[u8] = include_bytes!("../assets/VBCABLE_Setup_x64.exe");
-
-/// 释放后的文件名。放临时目录，装完即弃 —— 不做静默安装，驱动必须用户点确认。
-#[cfg(windows)]
+/// 外置安装包文件名（与 exe 同目录分发，装完即弃；不做静默安装，驱动必须用户点确认）。
 const SETUP_NAME: &str = "VBCABLE_Setup_x64.exe";
 
 /// 播放端点名字里出现这些片段就认定是 VB-CABLE。
@@ -29,27 +29,37 @@ pub fn looks_like_cable(name: &str) -> bool {
   HINTS.iter().any(|h| n.contains(h))
 }
 
-/// 把安装包释放到临时目录并**以管理员身份**启动它。
+/// 以管理员身份启动 exe 同目录下的外置安装包。
 ///
 /// 不做静默安装：驱动安装需要 UAC 确认，绕过它既不合法也不稳。
 /// 用户点完 VB-CABLE 自己的 Install 按钮、重启之后，再来点一次「刷新设备」。
+/// 用户也可以直接双击 `VBCABLE_Setup_x64.exe` 手动安装，效果一样。
 #[cfg(windows)]
 pub fn install() -> Result<String, String> {
   use windows::core::{w, HSTRING};
   use windows::Win32::UI::Shell::ShellExecuteW;
   use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-  let dir = std::env::temp_dir().join("GamingVoice");
-  std::fs::create_dir_all(&dir).map_err(|e| format!("建临时目录失败：{e}"))?;
-  let exe = dir.join(SETUP_NAME);
-  std::fs::write(&exe, SETUP).map_err(|e| format!("写出安装包失败：{e}"))?;
+  // 外置安装包：与 GamingVoice.exe 同目录（发布包解压后两者放在一起）。
+  let me = std::env::current_exe().map_err(|e| format!("取程序路径失败：{e}"))?;
+  let dir = me
+    .parent()
+    .map(|p| p.to_path_buf())
+    .unwrap_or_else(|| std::path::PathBuf::from("."));
+  let setup = dir.join(SETUP_NAME);
+  if !setup.is_file() {
+    return Err(format!(
+      "找不到 {SETUP_NAME}。请把它与 GamingVoice.exe 放在同一目录，再点一次；\
+       或直接双击 {SETUP_NAME} 手动安装。"
+    ));
+  }
 
-  let path = HSTRING::from(exe.to_string_lossy().to_string());
+  let path = HSTRING::from(setup.to_string_lossy().to_string());
   // runas = 提权；装驱动的标准做法
   let ret = unsafe { ShellExecuteW(None, w!("runas"), &path, None, None, SW_SHOWNORMAL) };
   // ShellExecuteW 的返回值 >32 才算成功，≤32 是错误码
   if ret.0 as isize > 32 {
-    Ok(format!("已启动安装程序：{}", exe.display()))
+    Ok(format!("已启动安装程序：{}", setup.display()))
   } else {
     Err(format!(
       "启动安装程序失败（代码 {}）。可能是取消了 UAC 授权，或系统策略禁止提权。",

@@ -1536,12 +1536,13 @@ function updateVb() {
   const title = card.querySelector('.vbBody > b');
   const text = card.querySelector('.vbBody > p');
   if (!vb.installed) {
-    btn.textContent = '一键安装 VB-CABLE';
+    btn.textContent = '运行安装包';
     btn.dataset.mode = 'install';
     title.textContent = '还差一步：VB-CABLE 虚拟声卡';
     text.innerHTML =
       '「单独调每个方向」的前提是游戏输出 <b>8 条独立声道</b>。没有虚拟 7.1 端点时，' +
       '系统只会给一条已经混好的立体声，8 个推子就退化成 1 个总音量。' +
+      '请运行随程序分发的 <b>VBCABLE_Setup_x64.exe</b>（与 GamingVoice.exe 同目录）手动安装，' +
       '装完还要在「声音设置 → 该设备 → 配置扬声器」里选 <b>7.1 环绕</b> —— 默认是立体声。';
   } else {
     btn.textContent = '打开声音设置';

@@ -267,16 +267,19 @@ SONICOM / CIPIC / HUTUBS 都是 SOFA（AES69）格式，用
 
 | 状态 | 卡片显示 | 按钮 |
 |---|---|---|
-| 没装 | 「还差一步：VB-CABLE 虚拟声卡」 | 一键安装 VB-CABLE |
+| 没装 | 「还差一步：VB-CABLE 虚拟声卡」 | 运行安装包 |
 | 装了但还是 2 声道 | 「VB-CABLE 已装，但还没配成 7.1」 | 打开声音设置 |
 | 装了且是 8 声道 | 隐藏 | — |
 
-「一键安装」把内嵌的 `VBCABLE_Setup_x64.exe` 释放到 `%TEMP%\GamingVoice\` 并**以管理员
-身份**启动它（`ShellExecuteW` 的 `runas`）。不做静默安装：驱动安装必须用户点确认，
-绕过 UAC 既不合法也不稳。
+「运行安装包」会以**管理员身份**启动 `GamingVoice.exe` 同目录下的
+`VBCABLE_Setup_x64.exe`（`ShellExecuteW` 的 `runas`）——你也可以直接双击它手动安装。
+不做静默安装：驱动安装必须用户点确认，绕过 UAC 既不合法也不稳。
 
+> 安装包不再内嵌进 exe：VB-CABLE 的 Setup 从 ZIP/临时目录直接运行会报
+> `Missing inf file / Installation cannot work from a ZIP folder`，所以改外置分发。
 > 安装包来自 [VB-Audio](https://vb-audio.com/Cable/) 的 Driver Pack 45，Donationware，
-> 允许原样再分发。程序只是替你省掉"去官网找下载"这一步，没有修改包装。
+> 允许原样再分发。编译时 `build.rs` 会把仓库根的 `VBCABLE_Setup_x64.exe` 复制到
+> 编译输出目录，随发布包一起分发。
 
 装完还得做一步：**声音设置 → 该设备 → 配置扬声器 → 7.1 环绕**。默认是立体声，
 不改这一步前面全白搭，所以卡片在你没配好之前不会消失。
@@ -305,7 +308,7 @@ SONICOM / CIPIC / HUTUBS 都是 SOFA（AES69）格式，用
 | GET | `/api/presets` | 预设列表 + 当前生效名 + 当前推子值 |
 | POST | `/api/presets` | body `{"action":"apply\|save\|delete","name":"…","gains_db":[…]}` |
 | POST | `/api/autostart` | body `{"on":true}`，开关开机启动 |
-| POST | `/api/vbcable/install` | 释放并提权运行 VB-CABLE 安装程序 |
+| POST | `/api/vbcable/install` | 提权运行 exe 同目录的 VB-CABLE 安装程序 |
 | POST | `/api/setup-guide` | 打开 Windows 声音设置 |
 
 例：把后左后右抬 10 dB

@@ -882,7 +882,7 @@ pub fn vb_cable_state() -> (bool, bool) {
   (installed, surround)
 }
 
-/// 一键装 VB-CABLE（内嵌安装包 → 临时目录 → 提权运行）。
+/// 启动外置 VB-CABLE 安装包（与 exe 同目录，提权运行）。
 pub fn vbcable_install() -> Value {
   match vbcable::install() {
     Ok(msg) => json!({ "ok": true, "message": msg }),

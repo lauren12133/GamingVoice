@@ -41,7 +41,7 @@ loopback、自己开渲染流，完全不碰那条单声道通路。它复用同
 
 ## 二、三分钟跑起来
 
-1. **装 VB-CABLE**（免费虚拟声卡），装完重启。程序面板内有一键安装。
+1. **装 VB-CABLE**（免费虚拟声卡），装完重启。运行随发布包分发的 `VBCABLE_Setup_x64.exe` 手动安装。
 2. **把它的播放端点改成 7.1** —— 这一步最容易漏：
    `声音设置 → 更多声音设置 → 播放 → CABLE Input → 右键"配置扬声器" → 7.1 环绕`。
    不改这步它只声明 2 声道，游戏照样输出立体声，推子就只会改总音量。
@@ -81,7 +81,8 @@ loopback、自己开渲染流，完全不碰那条单声道通路。它复用同
 | `gaming-voice/src/audio_windows.rs` | WASAPI loopback 采集 / 渲染、设备枚举与真实设备名 |
 | `gaming-voice/src/gui_windows.rs` | 原生窗口 + 任务栏托盘 |
 | `gaming-voice/src/web/` | 网页面板（`include_str!` 编译进 exe） |
-| `gaming-voice/assets/` | `icon.ico` + 内嵌的 VB-CABLE 安装包 |
+| `gaming-voice/assets/` | `icon.ico`（编译进 exe 图标） |
+| `VBCABLE_Setup_x64.exe` | VB-CABLE 驱动安装包（仓库根，外置分发；`build.rs` 编译时复制到输出目录） |
 | `gaming-voice/hrir/` | 内置 `EAC_Default.wav`（HeSuVi 14 轨，编译期嵌入） |
 | `src-tauri/src/dsp/surround/` | DSP 内核：布局、WAV、分块卷积、HRIR、EQ、ATK V3 引擎等 |
 | `src-tauri/src/compat/` | APO `Copy:` 混音矩阵解析兼容层（文档引用，不参与编译） |
