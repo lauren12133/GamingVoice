@@ -39,6 +39,24 @@ jobs:
         working-directory: gaming-voice
         run: cargo build --release
 
+      # build.rs 也会复制，但这里再显式兜底一次：无论安装包放在仓库根、
+      # gaming-voice/ 还是 assets/，都保证发布目录里有它。
+      - name: Bundle VB-CABLE installer
+        shell: pwsh
+        run: |
+          $candidates = @(
+            'VBCABLE_Setup_x64.exe',
+            'gaming-voice/VBCABLE_Setup_x64.exe',
+            'gaming-voice/assets/VBCABLE_Setup_x64.exe'
+          )
+          $src = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($src) {
+            Copy-Item $src 'gaming-voice/target/release/VBCABLE_Setup_x64.exe' -Force
+            Write-Host "bundled VB-CABLE installer from: $src"
+          } else {
+            Write-Host 'WARN: VBCABLE_Setup_x64.exe not found in repo'
+          }
+
       - name: Upload release (exe + VB-CABLE installer)
         uses: actions/upload-artifact@v4
         with:
