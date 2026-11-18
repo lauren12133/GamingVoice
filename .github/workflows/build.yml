@@ -39,9 +39,11 @@ jobs:
         working-directory: gaming-voice
         run: cargo build --release
 
-      - name: Upload exe
+      - name: Upload release (exe + VB-CABLE installer)
         uses: actions/upload-artifact@v4
         with:
           name: GamingVoice-windows-x64
-          path: gaming-voice/target/release/GamingVoice.exe
+          path: |
+            gaming-voice/target/release/GamingVoice.exe
+            gaming-voice/target/release/VBCABLE_Setup_x64.exe
           if-no-files-found: error
