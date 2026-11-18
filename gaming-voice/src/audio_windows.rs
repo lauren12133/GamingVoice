@@ -400,8 +400,7 @@ pub fn start_capture(
             // 按真实声道掩码重排成标准 7.1（FL FR FC LFE BL BR SL SR）再入环：
             // 目标声道不存在或越界就补零，避免把「侧环绕」读成「中置」。
             for f in 0..n as usize {
-              for c in 0..CHANNELS {
-                let src = remap[c];
+              for &src in remap.iter() {
                 let v = if silent || src == usize::MAX || src >= chn {
                   0.0
                 } else {
