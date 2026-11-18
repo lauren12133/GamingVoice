@@ -1,0 +1,5 @@
+# 与上游 DSP 源码（src-tauri/src/dsp/surround）保持同一套风格：
+# 2 空格缩进、100 列。这样两边文件互相搬运时不会产生纯格式 diff。
+tab_spaces = 2
+max_width = 100
+edition = "2021"
